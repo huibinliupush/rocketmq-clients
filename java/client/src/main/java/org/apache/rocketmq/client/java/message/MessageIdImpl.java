@@ -21,7 +21,9 @@ import com.google.common.base.Objects;
 import org.apache.rocketmq.client.apis.message.MessageId;
 
 public class MessageIdImpl implements MessageId {
+    // MESSAGE_ID_VERSION_V1
     private final String version;
+    // macAddress,pid,sequence,当前时间距离 2021-01-01 00:00:00 的 seconds
     private final String suffix;
 
     public MessageIdImpl(String version, String suffix) {

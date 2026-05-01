@@ -40,6 +40,7 @@ public class SimpleConsumerExample {
     }
 
     @SuppressWarnings({"resource", "InfiniteLoopStatement"})
+    // updateSubGroup -n localhost:9876 -c DefaultCluster -g yourConsumerGroup
     public static void main(String[] args) throws ClientException {
         final ClientServiceProvider provider = ClientServiceProvider.loadService();
 
@@ -49,18 +50,18 @@ public class SimpleConsumerExample {
         SessionCredentialsProvider sessionCredentialsProvider =
             new StaticSessionCredentialsProvider(accessKey, secretKey);
 
-        String endpoints = "foobar.com:8080";
+        String endpoints = "localhost:8081";
         ClientConfiguration clientConfiguration = ClientConfiguration.newBuilder()
             .setEndpoints(endpoints)
             // On some Windows platforms, you may encounter SSL compatibility issues. Try turning off the SSL option in
             // client configuration to solve the problem please if SSL is not essential.
             // .enableSsl(false)
-            .setCredentialProvider(sessionCredentialsProvider)
+            //.setCredentialProvider(sessionCredentialsProvider)
             .build();
         String consumerGroup = "yourConsumerGroup";
         Duration awaitDuration = Duration.ofSeconds(30);
         String tag = "yourMessageTagA";
-        String topic = "yourTopic";
+        String topic = "yourNormalTopic";
         FilterExpression filterExpression = new FilterExpression(tag, FilterExpressionType.TAG);
         // In most case, you don't need to create too many consumers, singleton pattern is recommended.
         SimpleConsumer consumer = provider.newSimpleConsumerBuilder()

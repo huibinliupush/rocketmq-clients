@@ -92,6 +92,15 @@ import org.apache.rocketmq.client.java.rpc.Signature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * AbstractIdleService 帮助你专注于服务的启动 (startUp) 和关闭 (shutDown) 逻辑
+ *
+ * 启动 (startUp) 与关闭 (shutDown) 的异步执行：
+ *
+ * startUp() 和 shutDown() 方法是 protected abstract 的，你需要在这两个方法里编写实际的业务逻辑。
+ *
+ * 这两个方法各自在一个独立的线程中运行，这意味着任何耗时的初始化或资源清理工作都不会阻塞调用 startAsync() 或 stopAsync() 的主线程
+ * */
 @SuppressWarnings({"UnstableApiUsage", "NullableProblems"})
 public abstract class ClientImpl extends AbstractIdleService implements Client, ClientSessionHandler,
     MessageInterceptor {
@@ -103,22 +112,27 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     private static final Duration TELEMETRY_TIMEOUT = Duration.ofDays(60 * 365);
 
     protected final ClientConfiguration clientConfiguration;
+    // 将配置中指定的 endPoints 字符串转换为 addresses 类型
     protected final Endpoints endpoints;
     protected final Set<String> topics;
-    // Thread-safe set.
+    // Thread-safe set.存储所有发送失败的 endpoint
+    // Isolate endpoints because of sending failure.
     protected final Set<Endpoints> isolated;
+    // 执行消息发送 future 的 callback
     protected final ExecutorService clientCallbackExecutor;
     protected final ClientMeterManager clientMeterManager;
     /**
      * Telemetry command executor, which aims to execute commands from the remote.
      */
     protected final ThreadPoolExecutor telemetryCommandExecutor;
+    // hostName@processId@index@System.nanoTime()
     protected final ClientId clientId;
-
+    // 封装客户端的各种 message 操作
     private final ClientManager clientManager;
     private volatile ScheduledFuture<?> updateRouteCacheFuture;
+    // topic 下所有副本集下的所有 broker（包括主从） 拥有的所有 messageQueue(包括各种权限)
     private final ConcurrentMap<String, TopicRouteData> topicRouteCache;
-
+    // topic 下正在获取 topic 路由的 future
     @GuardedBy("inflightRouteFutureLock")
     private final Map<String /* topic */, Set<SettableFuture<TopicRouteData>>> inflightRouteFutureTable;
     private final Lock inflightRouteFutureLock;
@@ -131,24 +145,30 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
 
     public ClientImpl(ClientConfiguration clientConfiguration, Set<String> topics) {
         this.clientConfiguration = checkNotNull(clientConfiguration, "clientConfiguration should not be null");
+        // localhost:8081,proxy grpcServer 监听 8081
+        // 将配置中指定的 endPoints 字符串转换为 addresses 类型
         this.endpoints = new Endpoints(clientConfiguration.getEndpoints());
+        // 用于预取 topic 路由
         this.topics = topics;
         // Generate client id firstly.
+        // hostName@processId@index@System.nanoTime()
         this.clientId = new ClientId();
-
+        // topic 路由
         this.topicRouteCache = new ConcurrentHashMap<>();
-
+        // 正在请求的 topic 路由 future
         this.inflightRouteFutureTable = new ConcurrentHashMap<>();
         this.inflightRouteFutureLock = new ReentrantLock();
 
         this.sessionsTable = new HashMap<>();
         this.sessionsLock = new ReentrantReadWriteLock();
-
+        // Thread-safe set.存储所有发送失败的 endpoint
+        // Isolate endpoints because of sending failure.
         this.isolated = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
         this.clientManager = new ClientManagerImpl(this);
 
         final long clientIdIndex = clientId.getIndex();
+        // 执行消息发送 future 的 callback
         this.clientCallbackExecutor = new ThreadPoolExecutor(
             Runtime.getRuntime().availableProcessors(),
             Runtime.getRuntime().availableProcessors(),
@@ -179,11 +199,15 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     @Override
     protected void startUp() throws Exception {
         log.info("Begin to start the rocketmq client, clientId={}", clientId);
+        // 回调 org.apache.rocketmq.client.java.impl.ClientManagerImpl.startUp
         this.clientManager.startAsync().awaitRunning();
         // Fetch topic route from remote.
         log.info("Begin to fetch topic(s) route data from remote during client startup, clientId={}, topics={}",
             clientId, topics);
+        // topic 路由预取
         for (String topic : topics) {
+            // 从 name server 中获取 topic 下所有副本集下所有 broker (包括主从) 下的所有 messageQueue(所有权限)
+            // 更新 updatePublishingLoadBalancer 过滤出 topic 下的 master broker 下的 writable messageQueue
             final ListenableFuture<TopicRouteData> future = fetchTopicRoute(topic);
             future.get();
         }
@@ -193,6 +217,7 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
         final ScheduledExecutorService scheduler = clientManager.getScheduler();
         this.updateRouteCacheFuture = scheduler.scheduleWithFixedDelay(() -> {
             try {
+                // 每隔 10s 获取 topic 路由
                 updateRouteCache();
             } catch (Throwable t) {
                 log.error("Exception raised while updating topic route cache, clientId={}", clientId, t);
@@ -332,6 +357,8 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
      */
     @Override
     public void syncSettings() {
+        // PublishingSettings
+        // see : org.apache.rocketmq.client.java.impl.producer.ProducerImpl.ProducerImpl
         final apache.rocketmq.v2.Settings settings = getSettings().toProtobuf();
         final TelemetryCommand command = TelemetryCommand.newBuilder().setSettings(settings).build();
         final Set<Endpoints> totalRouteEndpoints = getTotalRouteEndpoints();
@@ -401,6 +428,7 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
      */
     public ListenableFuture<TopicRouteData> onTopicRouteDataFetched(String topic,
     TopicRouteData topicRouteData) throws ClientException {
+        // proxy address list
         final Set<Endpoints> routeEndpoints = topicRouteData
             .getMessageQueues().stream()
             .map(mq -> mq.getBroker().getEndpoints())
@@ -415,6 +443,7 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
         final ListenableFuture<?> future = Futures.allAsList(futures);
         return Futures.transform(future, (Function<Object, TopicRouteData>) input -> {
             topicRouteCache.put(topic, topicRouteData);
+            // 从 topic 下所有副本集中过滤出 master broker,并且 messageQueue 是 writable
             onTopicRouteDataUpdate0(topic, topicRouteData);
             return topicRouteData;
         }, MoreExecutors.directExecutor());
@@ -462,6 +491,8 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     private void updateRouteCache() {
         log.info("Start to update route cache for a new round, clientId={}", clientId);
         topicRouteCache.keySet().forEach(topic -> {
+            // 从 name server 中获取 topic 下所有副本集下所有 broker (包括主从) 下的所有 messageQueue(所有权限)
+            // 更新 updatePublishingLoadBalancer 过滤出 topic 下的 master broker 下的 writable messageQueue
             final ListenableFuture<TopicRouteData> future = fetchTopicRoute(topic);
             Futures.addCallback(future, new FutureCallback<TopicRouteData>() {
                 @Override
@@ -522,7 +553,9 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
      */
     @Override
     public void doHeartbeat() {
+        // 获取 topic 路由中所有 messageQueue 所在 broker 的 endpoints(这里对应的依然是 proxy endpoints 其实，由 proxy 转发到具体的 broker)
         final Set<Endpoints> totalEndpoints = getTotalRouteEndpoints();
+        // gRPC HeartbeatRequest
         final HeartbeatRequest request = wrapHeartbeatRequest();
         for (Endpoints endpoints : totalEndpoints) {
             doHeartbeat(request, endpoints);
@@ -532,6 +565,9 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     /**
      * Real-time signature generation
      */
+    // gRPC 类封装客户端的相关元信息 (gRPC  headers) 会一起发送到 proxy 端
+    // see: org.apache.rocketmq.proxy.grpc.GrpcServerBuilder#configInterceptor
+    // see : org.apache.rocketmq.proxy.grpc.pipeline.ContextInitPipeline
     @Override
     public Metadata sign() throws NoSuchAlgorithmException, InvalidKeyException {
         return Signature.sign(clientConfiguration, clientId);
@@ -563,6 +599,9 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
                         return;
                     }
                     log.info("Send heartbeat successfully, endpoints={}, clientId={}", endpoints, clientId);
+                    // Thread-safe set.存储所有发送失败的 endpoint
+                    // Isolate endpoints because of sending failure.
+                    // 心跳消息发送成功了，就从 isolated 集合中删除 endpoints（有效了，不需要隔离）
                     final boolean removed = isolated.remove(endpoints);
                     if (removed) {
                         log.info("Rejoin endpoints which is isolated before, clientId={}, endpoints={}", clientId,
@@ -595,8 +634,11 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     }
 
     private ListenableFuture<TopicRouteData> fetchTopicRoute(final String topic) {
+        // 向 name server 查询 topic 下所有副本集中所有 broker(主从全包括)下的所有 messageQueue
+        // 用 TopicRouteData 封装
         final ListenableFuture<TopicRouteData> future0 = fetchTopicRoute0(topic);
         final ListenableFuture<TopicRouteData> future = Futures.transformAsync(future0,
+            // updatePublishingLoadBalancer
             topicRouteData -> onTopicRouteDataFetched(topic, topicRouteData), MoreExecutors.directExecutor());
         Futures.addCallback(future, new FutureCallback<TopicRouteData>() {
             @Override
@@ -620,17 +662,20 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
             .build();
         final QueryRouteRequest request = QueryRouteRequest.newBuilder().setTopic(topicResource)
             .setEndpoints(endpoints.toProtobuf()).build();
+        // 向 name server 查询 topic 下所有副本集中所有 broker(主从全包括)下的所有 messageQueue
         final RpcFuture<QueryRouteRequest, QueryRouteResponse> future =
             clientManager.queryRoute(endpoints, request, clientConfiguration.getRequestTimeout());
         return Futures.transformAsync(future, response -> {
             final Status status = response.getStatus();
             StatusChecker.check(status, future);
+            // topic 下所有副本集中所有 broker(主从全包括)下的所有 messageQueue
             final List<MessageQueue> messageQueuesList = response.getMessageQueuesList();
+            // gRpc MessageQueue list 转换为 TopicRouteData 中的 MessageQueueImpl list
             final TopicRouteData topicRouteData = new TopicRouteData(messageQueuesList);
             return Futures.immediateFuture(topicRouteData);
         }, MoreExecutors.directExecutor());
     }
-
+    // 获取 topic 路由中所有 messageQueue 所在 broker 的 endpoints(这里对应的依然是 proxy endpoints 其实，由 proxy 转发到具体的 broker)
     protected Set<Endpoints> getTotalRouteEndpoints() {
         Set<Endpoints> totalRouteEndpoints = new HashSet<>();
         for (TopicRouteData topicRouteData : topicRouteCache.values()) {
@@ -655,6 +700,7 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
                 future0.set(topicRouteData);
                 return future0;
             }
+            // topic 下正在获取 topic 路由的 future
             Set<SettableFuture<TopicRouteData>> inflightFutures = inflightRouteFutureTable.get(topic);
             // Request is in-flight, return future directly.
             if (null != inflightFutures) {
@@ -667,12 +713,15 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
         } finally {
             inflightRouteFutureLock.unlock();
         }
+        // 从 name server 中获取 topic 下所有副本集下所有 broker (包括主从) 下的所有 messageQueue(所有权限)
+        // 更新 updatePublishingLoadBalancer 过滤出 topic 下的 master broker 下的 writable messageQueue
         final ListenableFuture<TopicRouteData> future = fetchTopicRoute(topic);
         Futures.addCallback(future, new FutureCallback<TopicRouteData>() {
             @Override
             public void onSuccess(TopicRouteData topicRouteData) {
                 inflightRouteFutureLock.lock();
                 try {
+                    // 获取路由成功，通知所有正在等待路由的 future
                     final Set<SettableFuture<TopicRouteData>> newFutureSet =
                         inflightRouteFutureTable.remove(topic);
                     if (null == newFutureSet) {

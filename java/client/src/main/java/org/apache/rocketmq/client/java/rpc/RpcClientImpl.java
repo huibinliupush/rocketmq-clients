@@ -69,16 +69,29 @@ public class RpcClientImpl implements RpcClient {
     private static final int GRPC_MAX_MESSAGE_SIZE = Integer.MAX_VALUE;
 
     private final ManagedChannel channel;
-    private final MessagingServiceGrpc.MessagingServiceFutureStub futureStub;
-    private final MessagingServiceGrpc.MessagingServiceStub stub;
+    // gRPC Java generates code for three types of stubs: asynchronous, blocking, and future.
+    // Each type of stub has a corresponding class in the generated code,
+    // such as ServiceNameStub, ServiceNameBlockingStub, and ServiceNameFutureStub.
 
+    // RPCs made via a future stub wrap the return value of the asynchronous stub in a GrpcFuture<ResponseType>, which implements the com.google.common.util.concurrent.ListenableFuture interface.
+    // The future stub contains one Java method for each unary method in the service definition. Future stubs do not support streaming calls.
+    // A new future stub is instantiated via the ServiceNameGrpc.newFutureStub(Channel channel) static method.
+    // FutureStub 只支持 unary method 不支持 streaming calls
+    // 方法签名：public ListenableFuture<ResponseType> unaryExample(RequestType request)
+    private final MessagingServiceGrpc.MessagingServiceFutureStub futureStub;// future
+    // 支持所有 RPC 类型 unary method 以及 streaming
+    private final MessagingServiceGrpc.MessagingServiceStub stub;// asynchronous
+    // Blocking stubs do not support client-streaming or bidirectional-streaming RPCs.
+    // A new blocking stub is instantiated via the ServiceNameGrpc.newBlockingStub(Channel channel) static method.
+
+    // 每次客户端调用远程方法都会更新这里时间，用于判断 idle client (超过 30 分钟 idle)
     private long activityNanoTime;
-
+    // https://grpc.io/docs/languages/java/generated-code/
     @SuppressWarnings("deprecation")
     public RpcClientImpl(Endpoints endpoints, boolean sslEnabled) throws SSLException {
         final NettyChannelBuilder channelBuilder =
-            NettyChannelBuilder.forTarget(endpoints.getGrpcTarget())
-                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, CONNECT_TIMEOUT_MILLIS)
+            NettyChannelBuilder.forTarget(endpoints.getGrpcTarget()) // gRPC 也不会自动在所有地址之间进行轮询（Round Robin）。它通常会选择第一个可用的地址并在需要时重连到其他地址。
+                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, CONNECT_TIMEOUT_MILLIS)//3s
                 .maxInboundMessageSize(GRPC_MAX_MESSAGE_SIZE)
                 .intercept(LoggingInterceptor.getInstance());
 
@@ -95,17 +108,22 @@ public class RpcClientImpl implements RpcClient {
         channelBuilder.disableRetry();
         final List<InetSocketAddress> socketAddresses = endpoints.toSocketAddresses();
         if (null != socketAddresses) {
+            // 如果不是 DNS 的方式，这里提供所有的 ipv4 address， 供 gRPC 负载均衡
+            // 它通常会选择第一个可用的地址并在需要时重连到其他地址。
             final IpNameResolverFactory ipNameResolverFactory = new IpNameResolverFactory(socketAddresses);
             channelBuilder.nameResolverFactory(ipNameResolverFactory);
         }
         this.channel = channelBuilder.build();
+        // 对应的 proxy 端实现 GrpcMessagingApplication
         this.futureStub = MessagingServiceGrpc.newFutureStub(channel);
+        // asynchronous stub
         this.stub = MessagingServiceGrpc.newStub(channel);
         this.activityNanoTime = System.nanoTime();
     }
 
     @Override
     public Duration idleDuration() {
+        // 每次发起远程请求更新 activityNanoTime
         return Duration.ofNanos(System.nanoTime() - activityNanoTime);
     }
 
@@ -118,6 +136,7 @@ public class RpcClientImpl implements RpcClient {
     public ListenableFuture<QueryRouteResponse> queryRoute(Metadata metadata,
         QueryRouteRequest request, Executor executor, Duration duration) {
         this.activityNanoTime = System.nanoTime();
+        // asyncWorker
         return futureStub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata)).withExecutor(executor)
             .withDeadlineAfter(duration.toNanos(), TimeUnit.NANOSECONDS).queryRoute(request);
     }

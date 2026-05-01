@@ -182,8 +182,10 @@ public class Endpoints {
 
     public String getGrpcTarget() {
         if (AddressScheme.DOMAIN_NAME.equals(scheme)) {
+            // rocketmq.apache.org:8080
             return facade.substring(scheme.getPrefix().length());
         }
+        // ipv4:127.0.0.1:10911,127.0.0.2:10912
         return facade;
     }
 

@@ -43,6 +43,9 @@ public interface Client {
      *
      * @return the signature for TLS (Transport Layer Security).
      * @throws Exception if an error occurs during the signature generation process.
+     *  gRPC 类封装客户端的相关元信息 (gRPC  headers) 会一起发送到 proxy 端
+     *  see: org.apache.rocketmq.proxy.grpc.GrpcServerBuilder#configInterceptor
+     *  see : org.apache.rocketmq.proxy.grpc.pipeline.ContextInitPipeline
      */
     Metadata sign() throws Exception;
 

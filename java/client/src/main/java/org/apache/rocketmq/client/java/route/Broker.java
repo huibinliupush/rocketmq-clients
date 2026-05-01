@@ -25,6 +25,7 @@ import javax.annotation.concurrent.Immutable;
 public class Broker {
     private final String name;
     private final int id;
+    // proxy address list
     private final Endpoints endpoints;
 
     public Broker(apache.rocketmq.v2.Broker broker) {

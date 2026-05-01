@@ -33,6 +33,7 @@ public class TopicRouteData {
     private final AtomicInteger index;
     /**
      * Message queues of topic route.
+     * topic 下所有副本集下的所有 broker（包括主从） 拥有的所有 messageQueue(包括各种权限)
      */
     private final ImmutableList<MessageQueueImpl> messageQueueImpls;
 
@@ -52,6 +53,7 @@ public class TopicRouteData {
 
     public Set<Endpoints> getTotalEndpoints() {
         Set<Endpoints> endpointsSet = new HashSet<>();
+        // 获取 messageQueue 所在 broker 地址（其实是 proxy 地址，后续由 proxy 转发）
         for (MessageQueueImpl messageQueueImpl : messageQueueImpls) {
             endpointsSet.add(messageQueueImpl.getBroker().getEndpoints());
         }

@@ -46,18 +46,18 @@ public class PushConsumerExample {
         SessionCredentialsProvider sessionCredentialsProvider =
             new StaticSessionCredentialsProvider(accessKey, secretKey);
 
-        String endpoints = "foobar.com:8080";
+        String endpoints = "localhost:8081";
         ClientConfiguration clientConfiguration = ClientConfiguration.newBuilder()
             .setEndpoints(endpoints)
             // On some Windows platforms, you may encounter SSL compatibility issues. Try turning off the SSL option in
             // client configuration to solve the problem please if SSL is not essential.
             // .enableSsl(false)
-            .setCredentialProvider(sessionCredentialsProvider)
+            //.setCredentialProvider(sessionCredentialsProvider)
             .build();
         String tag = "yourMessageTagA";
         FilterExpression filterExpression = new FilterExpression(tag, FilterExpressionType.TAG);
         String consumerGroup = "yourConsumerGroup";
-        String topic = "yourTopic";
+        String topic = "yourNormalTopic";
         // In most case, you don't need to create too many consumers, singleton pattern is recommended.
         PushConsumer pushConsumer = provider.newPushConsumerBuilder()
             .setClientConfiguration(clientConfiguration)

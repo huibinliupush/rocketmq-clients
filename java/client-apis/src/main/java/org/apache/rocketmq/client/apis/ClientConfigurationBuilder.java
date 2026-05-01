@@ -27,6 +27,7 @@ import org.apache.rocketmq.client.apis.consumer.SimpleConsumerBuilder;
  * Builder to set {@link ClientConfiguration}.
  */
 public class ClientConfigurationBuilder {
+    // localhost:8081,proxy grpcServer 监听 8081
     private String endpoints;
     private SessionCredentialsProvider sessionCredentialsProvider = null;
     private Duration requestTimeout = Duration.ofSeconds(3);

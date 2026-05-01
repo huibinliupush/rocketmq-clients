@@ -21,6 +21,8 @@ import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 
 public class Address {
+    // 如果指定的是 DNS , 这里就是域名
+    // 其他情况就是 ip
     private final String host;
     private final int port;
 

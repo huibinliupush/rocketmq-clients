@@ -34,18 +34,22 @@ import org.apache.rocketmq.client.java.route.MessageQueueImpl;
  * Specifically speaking, Some work has been brought forward, e.g. message body compression, message id generation, etc.
  */
 public class PublishingMessageImpl extends MessageImpl {
+    // macAddress,pid,sequence,当前时间距离 2021-01-01 00:00:00 的 seconds
     private final MessageId messageId;
     private final MessageType messageType;
 
     public PublishingMessageImpl(Message message, PublishingSettings publishingSettings, boolean txEnabled)
         throws IOException {
+        // copy 原 message, 目的是为了保证原 message 内容不被修改
         super(message);
         final int length = message.getBody().remaining();
+        // 4M
         final int maxBodySizeBytes = publishingSettings.getMaxBodySizeBytes();
         if (length > maxBodySizeBytes) {
             throw new IOException("Message body size exceeds the threshold, max size=" + maxBodySizeBytes + " bytes");
         }
         // Generate message id.
+        // macAddress,pid,sequence,当前时间距离 2021-01-01 00:00:00 的 seconds
         this.messageId = MessageIdCodec.getInstance().nextMessageId();
         // Normal message.
         if (!message.getMessageGroup().isPresent() &&
@@ -98,9 +102,9 @@ public class PublishingMessageImpl extends MessageImpl {
                 .setBornTimestamp(Timestamps.fromMillis(System.currentTimeMillis()))
                 // Born host
                 .setBornHost(Utilities.hostName())
-                // Body encoding
+                // Body encoding 默认 IDENTITY 不进行压缩，另一个选项是 GZIP
                 .setBodyEncoding(Encoding.toProtobuf(Encoding.IDENTITY))
-                // Queue id
+                // Queue id，后续再 proxy 中还会重新设置，我们以 proxy 中设置的为准
                 .setQueueId(mq.getQueueId())
                 // Message type
                 .setMessageType(MessageType.toProtobuf(messageType));
@@ -120,7 +124,7 @@ public class PublishingMessageImpl extends MessageImpl {
             .setBody(ByteString.copyFrom(getBody()))
             // System properties
             .setSystemProperties(systemProperties)
-            // User properties
+            // User properties：org.apache.rocketmq.client.java.message.MessageImpl.properties
             .putAllUserProperties(getProperties())
             .build();
     }

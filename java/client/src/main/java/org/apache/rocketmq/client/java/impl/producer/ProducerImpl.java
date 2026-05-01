@@ -95,6 +95,7 @@ class ProducerImpl extends ClientImpl implements Producer {
     private static final Logger log = LoggerFactory.getLogger(ProducerImpl.class);
 
     protected final PublishingSettings publishingSettings;
+    // 从 topic 下所有副本集中过滤出 master broker,并且 messageQueue 是 writable
     final ConcurrentMap<String/* topic */, PublishingLoadBalancer> publishingRouteDataCache;
     private final TransactionChecker checker;
 
@@ -105,6 +106,10 @@ class ProducerImpl extends ClientImpl implements Producer {
     ProducerImpl(ClientConfiguration clientConfiguration, Set<String> topics, int maxAttempts,
         TransactionChecker checker) {
         super(clientConfiguration, topics);
+        // 消息发送失败时的重试间隔策略 -> 指数退避算法
+        // 除服务端返回系统流控错误场景，其他触发条件触发重试后，均会立即进行重试，无等待间隔。
+        // 若由于服务端返回流控错误触发重试，系统会按照指数退避策略进行延迟重试
+        // immediatelyRetryPolicy 为立即重试，无退避
         ExponentialBackoffRetryPolicy retryPolicy = ExponentialBackoffRetryPolicy.immediatelyRetryPolicy(maxAttempts);
         this.publishingSettings = new PublishingSettings(clientConfiguration.getNamespace(), clientId, endpoints,
             retryPolicy, clientConfiguration.getRequestTimeout(), topics);
@@ -204,6 +209,8 @@ class ProducerImpl extends ClientImpl implements Producer {
      */
     @Override
     public SendReceipt send(Message message) throws ClientException {
+        // Futures.transform 类似于 thenApply ，其接收的是 funtion 参数，返回的是 funtion 中具体的值 , transform 的过程是同步的
+        // Futures.transformAsync 类似于 thenCompose ，其接收的是 AsyncFunction ， 返回的是另一个 future ， transform 的过程是异步的
         final ListenableFuture<SendReceipt> future = Futures.transform(send(Collections.singletonList(message), false),
             sendReceipts -> sendReceipts.iterator().next(), MoreExecutors.directExecutor());
         return handleClientFuture(future);
@@ -342,6 +349,7 @@ class ProducerImpl extends ClientImpl implements Producer {
      * Take message queue(s) from route for message publishing.
      */
     private List<MessageQueueImpl> takeMessageQueues(PublishingLoadBalancer result) {
+        // 选取 MaxAttempts 个 essageQueue
         return result.takeMessageQueues(isolated, this.getRetryPolicy().getMaxAttempts());
     }
 
@@ -360,6 +368,7 @@ class ProducerImpl extends ClientImpl implements Producer {
         List<PublishingMessageImpl> pubMessages = new ArrayList<>();
         for (Message message : messages) {
             try {
+                // publishing view for message, 生成 messageId, messageType
                 final PublishingMessageImpl pubMessage = new PublishingMessageImpl(message, publishingSettings,
                     txEnabled);
                 pubMessages.add(pubMessage);
@@ -387,6 +396,7 @@ class ProducerImpl extends ClientImpl implements Producer {
         final Set<MessageType> messageTypes = pubMessages.stream()
             .map(PublishingMessageImpl::getMessageType)
             .collect(Collectors.toSet());
+        // 一个 topic 只能支持一种 messageType
         if (1 < messageTypes.size()) {
             // Messages have different message type, no need to proceed.
             final IllegalArgumentException e = new IllegalArgumentException("Messages to send have different types, "
@@ -420,13 +430,18 @@ class ProducerImpl extends ClientImpl implements Producer {
         }
 
         this.topics.add(topic);
-        // Get publishing topic route.
+        // Get publishing topic route. 对应 topic 下所有副本集中 master broker 的所有 writable messaegQueue
         final ListenableFuture<PublishingLoadBalancer> routeFuture = getPublishingLoadBalancer(topic);
         return Futures.transformAsync(routeFuture, result -> {
             // Prepare the candidate message queue(s) for retry-sending in advance.
+            // FIFO 消息与其他消息 messageQueue 的负载均衡
+            // takeMessageQueues ： 轮询选取 MaxAttempts 个 messageQueue，目的是重试的时候可以选择不同的 messageQueue
+            // takeMessageQueueByMessageGroup：通过 messageGroup 的 hash 值 mod messageQueueSize，保证同一 messageGroup 的消息一定能分配到同一 messageQueue
+            // 如果需要支持动态扩缩容，应考虑一致性哈希
             final List<MessageQueueImpl> candidates = null == messageGroup ? takeMessageQueues(result) :
                 Collections.singletonList(result.takeMessageQueueByMessageGroup(messageGroup));
             final SettableFuture<List<SendReceiptImpl>> future0 = SettableFuture.create();
+            // attempt 表示是第几次发送 send, 发送失败之后，attempt + 1 然后继续重试
             send0(future0, topic, messageType, candidates, pubMessages, 1);
             return future0;
         }, MoreExecutors.directExecutor());
@@ -436,6 +451,7 @@ class ProducerImpl extends ClientImpl implements Producer {
      * The caller is supposed to make sure different messages have the same message type and same topic.
      */
     private SendMessageRequest wrapSendMessageRequest(List<PublishingMessageImpl> pubMessages, MessageQueueImpl mq) {
+        // PublishingMessageImpl 转换为 gRPC Message
         final List<apache.rocketmq.v2.Message> messages = pubMessages.stream()
             .map(publishingMessage -> publishingMessage.toProtobuf(clientConfiguration.getNamespace(), mq))
             .collect(Collectors.toList());
@@ -444,6 +460,7 @@ class ProducerImpl extends ClientImpl implements Producer {
 
     ListenableFuture<List<SendReceiptImpl>> send0(Endpoints endpoints, List<PublishingMessageImpl> pubMessages,
         MessageQueueImpl mq) {
+        // PublishingMessageImpl 转换为 gRPC Message
         final SendMessageRequest request = wrapSendMessageRequest(pubMessages, mq);
         final RpcFuture<SendMessageRequest, SendMessageResponse> future0 =
             this.getClientManager().sendMessage(endpoints, request, clientConfiguration.getRequestTimeout());
@@ -454,10 +471,13 @@ class ProducerImpl extends ClientImpl implements Producer {
 
     /**
      * Warning: please DO NOT modify the signature of this method, it is used by OpenTelemetry instrumentation.
+     * attempt 表示是第几次发送 send, 发送失败之后，attempt + 1 然后继续重试
      */
     private void send0(SettableFuture<List<SendReceiptImpl>> future0, String topic, MessageType messageType,
         final List<MessageQueueImpl> candidates, final List<PublishingMessageImpl> messages, final int attempt) {
         // Calculate the current message queue.
+        // 重试的时候会换一个 messageQueue 进行，对于 FIFO 来说 candidates 中就只有一个 queue 没法换
+        // attempt 会在每次重试之前 + 1
         final MessageQueueImpl mq = candidates.get(IntMath.mod(attempt - 1, candidates.size()));
         final List<MessageType> acceptMessageTypes = mq.getAcceptMessageTypes();
         if (publishingSettings.isValidateMessageType() && !acceptMessageTypes.contains(messageType)) {
@@ -467,6 +487,7 @@ class ProducerImpl extends ClientImpl implements Producer {
             future0.setException(e);
             return;
         }
+        // proxy address list
         final Endpoints endpoints = mq.getBroker().getEndpoints();
         final ListenableFuture<List<SendReceiptImpl>> future = send0(endpoints, messages, mq);
         final int maxAttempts = this.getRetryPolicy().getMaxAttempts();
@@ -540,6 +561,7 @@ class ProducerImpl extends ClientImpl implements Producer {
                 // Try to do more attempts.
                 int nextAttempt = 1 + attempt;
                 // Retry immediately if the request is not throttled.
+                // 除服务端返回系统流控错误场景，其他触发条件触发重试后，均会立即进行重试，无等待间隔。
                 if (!(t instanceof TooManyRequestsException)) {
                     log.warn("Failed to send message, would attempt to resend right now, maxAttempts={}, "
                             + "attempt={}, topic={}, messageId(s)={}, endpoints={}, clientId={}", maxAttempts, attempt,
@@ -547,6 +569,9 @@ class ProducerImpl extends ClientImpl implements Producer {
                     send0(future0, topic, messageType, candidates, messages, nextAttempt);
                     return;
                 }
+                // 流控场景：服务端请求任务排队溢出：若消费者消费能力不足，导致队列中有大量堆积消息，当堆积消息超过一定数量后会触发消息流控，减少下游消费系统压力。
+                // 若由于服务端返回流控错误触发重试，系统会按照指数退避策略进行延迟重试
+                // 退避算法，计算下一次重试间隔
                 final Duration delay = ProducerImpl.this.getRetryPolicy().getNextAttemptDelay(nextAttempt);
                 log.warn("Failed to send message due to too many requests, would attempt to resend after {}, "
                         + "maxAttempts={}, attempt={}, topic={}, messageId(s)={}, endpoints={}, clientId={}", delay,
@@ -575,6 +600,8 @@ class ProducerImpl extends ClientImpl implements Producer {
         if (null != loadBalancer) {
             return Futures.immediateFuture(loadBalancer);
         }
+        // 从 name server 中获取 topic 下所有副本集下所有 broker (包括主从) 下的所有 messageQueue(所有权限)
+        // 更新 updatePublishingLoadBalancer 过滤出 topic 下的 master broker 下的 writable messageQueue
         return Futures.transform(getRouteData(topic), topicRouteData -> updatePublishingLoadBalancer(topic,
             topicRouteData), MoreExecutors.directExecutor());
     }

@@ -25,11 +25,17 @@ import org.apache.rocketmq.client.java.retry.RetryPolicy;
 import org.apache.rocketmq.client.java.route.Endpoints;
 
 public abstract class Settings {
+    // 默认为空字符串 ""
     protected final String namespace;
+    // hostName@processId@index@System.nanoTime()
     protected final ClientId clientId;
+    // PRODUCER or PUSH_CONSUMER OR SIMPLE_CONSUMER
     protected final ClientType clientType;
+    // PROXY  endPoints
     protected final Endpoints accessPoint;
+    // ExponentialBackoffRetryPolicy.immediatelyRetryPolicy
     protected volatile RetryPolicy retryPolicy;
+    // 3s
     protected final Duration requestTimeout;
 
     public Settings(String namespace, ClientId clientId, ClientType clientType, Endpoints accessPoint,

@@ -17,6 +17,7 @@
 
 package org.apache.rocketmq.client.java.example;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -31,14 +32,18 @@ public class ProducerNormalMessageExample {
 
     private ProducerNormalMessageExample() {
     }
-
-    public static void main(String[] args) throws ClientException {
+    // updatetopic -n localhost:9876 -t yourNormalTopic -c DefaultCluster
+    public static void main(String[] args) throws ClientException, IOException {
+        // SPI 加载 ClientServiceProviderImpl
+        // 提供客户端相关核心类的 builder
         final ClientServiceProvider provider = ClientServiceProvider.loadService();
 
         String topic = "yourNormalTopic";
+        // 构建单例 producer
         final Producer producer = ProducerSingleton.getInstance(topic);
         // Define your message body.
         byte[] body = "This is a normal message for Apache RocketMQ".getBytes(StandardCharsets.UTF_8);
+        // 每条消息允许设置一个Tag标签
         String tag = "yourMessageTagA";
         final Message message = provider.newMessageBuilder()
             // Set topic for the current message.
@@ -54,9 +59,11 @@ public class ProducerNormalMessageExample {
             log.info("Send message successfully, messageId={}", sendReceipt.getMessageId());
         } catch (Throwable t) {
             log.error("Failed to send message", t);
+        } finally {
+            producer.close();
         }
         // Close the producer when you don't need it anymore.
         // You could close it manually or add this into the JVM shutdown hook.
-        // producer.close();
+
     }
 }

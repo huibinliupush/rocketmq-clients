@@ -95,15 +95,18 @@ public class ClientManagerImpl extends ClientManager {
     private static final Logger log = LoggerFactory.getLogger(ClientManagerImpl.class);
 
     private final Client client;
-
+    // RpcClient 内部封装的 gRPC stub 会对 Endpoints 进行负载均衡
+    // 默认会选择第一个可用的地址并在需要时重连到其他地址。
     @GuardedBy("rpcClientTableLock")
     private final Map<Endpoints, RpcClient> rpcClientTable;
     private final ReadWriteLock rpcClientTableLock;
 
     /**
      * In charge of all scheduled tasks.
+     * 用于发送失败是，根据退避算法计算出的重试间隔，进行消息发送重试
+     * 客户端相关的定时任务：定时发送心跳，定时清理idle client，定时更新 topic 路由
      */
-    private final ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService scheduler;// availableProcessors
 
     /**
      * Public executor for all async RPCs, <strong>should never submit a heavy task.</strong>
@@ -112,13 +115,17 @@ public class ClientManagerImpl extends ClientManager {
 
     public ClientManagerImpl(Client client) {
         this.client = client;
+        // RpcClient 内部封装的 gRPC stub 会对 Endpoints 进行负载均衡
+        // 默认会选择第一个可用的地址并在需要时重连到其他地址。
+        // 这里封装客户端所需打交道的所有 endpoints (包括 nameServer, brokers)
         this.rpcClientTable = new HashMap<>();
         this.rpcClientTableLock = new ReentrantReadWriteLock();
         final long clientIndex = client.getClientId().getIndex();
+        // 用于发送失败是，根据退避算法计算出的重试间隔，进行消息发送重试
         this.scheduler = new ScheduledThreadPoolExecutor(
             Runtime.getRuntime().availableProcessors(),
             new ThreadFactoryImpl("ClientScheduler", clientIndex));
-
+        // executor for all async RPCs
         this.asyncWorker = new ThreadPoolExecutor(
             Runtime.getRuntime().availableProcessors(),
             Runtime.getRuntime().availableProcessors(),
@@ -144,6 +151,7 @@ public class ClientManagerImpl extends ClientManager {
                 final RpcClient rpcClient = entry.getValue();
 
                 final Duration idleDuration = rpcClient.idleDuration();
+                // idleDuration 超过 30 分钟就关闭
                 if (idleDuration.compareTo(RPC_CLIENT_MAX_IDLE_DURATION) > 0) {
                     it.remove();
                     rpcClient.shutdown();
@@ -198,6 +206,9 @@ public class ClientManagerImpl extends ClientManager {
     public RpcFuture<QueryRouteRequest, QueryRouteResponse> queryRoute(Endpoints endpoints, QueryRouteRequest request,
         Duration duration) {
         try {
+            // gRPC 类封装客户端的相关元信息 (gRPC  headers) 会一起发送到 proxy 端
+            // see: org.apache.rocketmq.proxy.grpc.GrpcServerBuilder#configInterceptor
+            // see : org.apache.rocketmq.proxy.grpc.pipeline.ContextInitPipeline
             final Metadata metadata = client.sign();
             final Context context = new Context(endpoints, metadata);
             final RpcClient rpcClient = getRpcClient(endpoints);
@@ -213,6 +224,9 @@ public class ClientManagerImpl extends ClientManager {
     public RpcFuture<HeartbeatRequest, HeartbeatResponse> heartbeat(Endpoints endpoints, HeartbeatRequest request,
         Duration duration) {
         try {
+            // gRPC 类封装客户端的相关元信息 (gRPC  headers) 会一起发送到 proxy 端
+            // see: org.apache.rocketmq.proxy.grpc.GrpcServerBuilder#configInterceptor
+            // see : org.apache.rocketmq.proxy.grpc.pipeline.ContextInitPipeline
             final Metadata metadata = client.sign();
             final Context context = new Context(endpoints, metadata);
             final RpcClient rpcClient = getRpcClient(endpoints);
@@ -227,6 +241,9 @@ public class ClientManagerImpl extends ClientManager {
     public RpcFuture<SendMessageRequest, SendMessageResponse> sendMessage(Endpoints endpoints,
         SendMessageRequest request, Duration duration) {
         try {
+            // gRPC 类封装客户端的相关元信息 (gRPC  headers) 会一起发送到 proxy 端
+            // see: org.apache.rocketmq.proxy.grpc.GrpcServerBuilder#configInterceptor
+            // see : org.apache.rocketmq.proxy.grpc.pipeline.ContextInitPipeline
             final Metadata metadata = client.sign();
             final Context context = new Context(endpoints, metadata);
             final RpcClient rpcClient = getRpcClient(endpoints);
@@ -380,11 +397,13 @@ public class ClientManagerImpl extends ClientManager {
 
     @Override
     protected void startUp() {
+        // hostName@processId@index@System.nanoTime()
         final ClientId clientId = client.getClientId();
         log.info("Begin to start the client manager, clientId={}", clientId);
         scheduler.scheduleWithFixedDelay(
             () -> {
                 try {
+                    // 每 1 分钟
                     clearIdleRpcClients();
                 } catch (Throwable t) {
                     log.error("Exception raised during the clearing of idle rpc clients, clientId={}", clientId, t);
@@ -398,6 +417,7 @@ public class ClientManagerImpl extends ClientManager {
         scheduler.scheduleWithFixedDelay(
             () -> {
                 try {
+                    // 10s
                     client.doHeartbeat();
                 } catch (Throwable t) {
                     log.error("Exception raised during heartbeat, clientId={}", clientId, t);
@@ -428,6 +448,9 @@ public class ClientManagerImpl extends ClientManager {
         scheduler.scheduleWithFixedDelay(
             () -> {
                 try {
+                    // 每 5 分钟
+                    // PublishingSettings
+                    // see : org.apache.rocketmq.client.java.impl.producer.ProducerImpl.ProducerImpl
                     client.syncSettings();
                 } catch (Throwable t) {
                     log.error("Exception raised during the setting synchronization, clientId={}", clientId, t);

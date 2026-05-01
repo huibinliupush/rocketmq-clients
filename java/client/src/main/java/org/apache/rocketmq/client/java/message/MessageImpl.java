@@ -33,18 +33,21 @@ import org.apache.rocketmq.client.apis.message.Message;
  * @see Message
  */
 public class MessageImpl implements Message {
+    // 消息 key, 可设置多个
     protected final Collection<String> keys;
 
     final byte[] body;
     private final String topic;
-
+    // 每条消息允许设置一个Tag标签
     @Nullable
     private final String tag;
+    // FIFO 需要设置，这样可以保证同一个 messageGroup 的消息可以被分发到同一个 messageQueue 中
     @Nullable
     private final String messageGroup;
+    // 延时消息设置
     @Nullable
     private final Long deliveryTimestamp;
-
+    // 消息 properties, 设置消息的一些属性，比如 messageId, messageType
     private final Map<String, String> properties;
 
     /**

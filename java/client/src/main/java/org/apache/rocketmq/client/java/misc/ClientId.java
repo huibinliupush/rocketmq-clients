@@ -24,6 +24,7 @@ public class ClientId {
     private static final String CLIENT_ID_SEPARATOR = "@";
 
     private final long index;
+    // hostName@processId@index@System.nanoTime()
     private final String id;
 
     public ClientId() {

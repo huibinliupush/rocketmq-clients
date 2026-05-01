@@ -56,6 +56,10 @@ public class ProducerBuilderImpl implements ProducerBuilder {
      */
     @Override
     public ProducerBuilder setTopics(String... topics) {
+        // peek 通常用于在不影响最终结果的情况下观察或调试流的处理过程,不改变元素本身，所以只接受一个 Consumer action
+        // peek 是一个惰性中间操作，只有在流的终端操作被触发时才会真正执行。并且，如果终端操作只关心部分元素（如 findFirst、limit），peek 可能只会对部分元素执行
+        // 例如：count() 可能直接获取流的大小而不遍历元素，因此 peek 可能不被执行。永远不要依赖 peek 执行必要的业务逻辑，仅用于调试。
+        // peek 的存在主要是为了支持调试，在流管道执行过程中查看元素。但在诸如 count()、forEach() 等优化下，peek 可能不会被调用
         final Set<String> set = Arrays.stream(topics).peek(topic -> checkNotNull(topic, "topic should not be null"))
             .peek(topic -> checkArgument(MessageBuilderImpl.TOPIC_PATTERN.matcher(topic).matches(), "topic does not "
                 + "match the regex [regex=%s]", MessageBuilderImpl.TOPIC_PATTERN.pattern()))
@@ -90,6 +94,8 @@ public class ProducerBuilderImpl implements ProducerBuilder {
     public Producer build() {
         checkNotNull(clientConfiguration, "clientConfiguration has not been set yet");
         final ProducerImpl producer = new ProducerImpl(clientConfiguration, topics, maxAttempts, checker);
+        // 回调 org.apache.rocketmq.client.java.impl.ClientImpl.startUp
+        // 启动 clientManager ， 预取 topic 路由
         producer.startAsync().awaitRunning();
         return producer;
     }

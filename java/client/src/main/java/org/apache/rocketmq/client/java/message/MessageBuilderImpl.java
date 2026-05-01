@@ -37,6 +37,7 @@ public class MessageBuilderImpl implements MessageBuilder {
 
     private String topic = null;
     private byte[] body = null;
+    // 每条消息允许设置一个Tag标签
     private String tag = null;
     private String messageGroup = null;
     private Long deliveryTimestamp = null;

@@ -94,6 +94,7 @@ public class SendReceiptImpl implements SendReceipt {
         for (SendResultEntry entry : entries) {
             final MessageId messageId = MessageIdCodec.getInstance().decode(entry.getMessageId());
             final String transactionId = entry.getTransactionId();
+            // consumeQueue offset(index)
             final long offset = entry.getOffset();
             final String recallHandle = entry.getRecallHandle();
             final SendReceiptImpl impl = new SendReceiptImpl(messageId, transactionId, mq, offset, recallHandle);

@@ -24,10 +24,14 @@ import java.util.Optional;
  * Common client configuration.
  */
 public class ClientConfiguration {
+    // localhost:8081,proxy grpcServer 监听 8081
     private final String endpoints;
     private final SessionCredentialsProvider sessionCredentialsProvider;
+    // 3s
     private final Duration requestTimeout;
+    // true
     private final boolean sslEnabled;
+    // ""
     private final String namespace;
 
     /**

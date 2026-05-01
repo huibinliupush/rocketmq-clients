@@ -20,8 +20,6 @@ package org.apache.rocketmq.client.java.example;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
-import org.apache.rocketmq.client.apis.SessionCredentialsProvider;
-import org.apache.rocketmq.client.apis.StaticSessionCredentialsProvider;
 import org.apache.rocketmq.client.apis.producer.Producer;
 import org.apache.rocketmq.client.apis.producer.ProducerBuilder;
 import org.apache.rocketmq.client.apis.producer.TransactionChecker;
@@ -37,7 +35,7 @@ public class ProducerSingleton {
     private static volatile Producer TRANSACTIONAL_PRODUCER;
     private static final String ACCESS_KEY = "yourAccessKey";
     private static final String SECRET_KEY = "yourSecretKey";
-    private static final String ENDPOINTS = "foobar.com:8080";
+    private static final String ENDPOINTS = "localhost:8081";// proxy grpcServer 监听 8081
 
     private ProducerSingleton() {
     }
@@ -47,14 +45,14 @@ public class ProducerSingleton {
         // Credential provider is optional for client configuration.
         // This parameter is necessary only when the server ACL is enabled. Otherwise,
         // it does not need to be set by default.
-        SessionCredentialsProvider sessionCredentialsProvider =
-            new StaticSessionCredentialsProvider(ACCESS_KEY, SECRET_KEY);
+        // SessionCredentialsProvider sessionCredentialsProvider =
+        //    new StaticSessionCredentialsProvider(ACCESS_KEY, SECRET_KEY);
         ClientConfiguration clientConfiguration = ClientConfiguration.newBuilder()
             .setEndpoints(ENDPOINTS)
             // On some Windows platforms, you may encounter SSL compatibility issues. Try turning off the SSL option in
             // client configuration to solve the problem please if SSL is not essential.
             // .enableSsl(false)
-            .setCredentialProvider(sessionCredentialsProvider)
+            //.setCredentialProvider(sessionCredentialsProvider)
             .build();
         final ProducerBuilder builder = provider.newProducerBuilder()
             .setClientConfiguration(clientConfiguration)

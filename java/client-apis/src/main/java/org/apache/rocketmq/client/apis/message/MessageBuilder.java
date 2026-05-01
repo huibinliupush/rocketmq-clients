@@ -44,6 +44,7 @@ public interface MessageBuilder {
      * Set the tag for the message, which is optional.
      *
      * <p>Tag is a secondary classifier for each message besides the topic.
+     * 每条消息允许设置一个Tag标签
      *
      * @param tag the tag for the message.
      * @return the message builder instance.

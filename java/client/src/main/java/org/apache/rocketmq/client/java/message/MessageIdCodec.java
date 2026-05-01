@@ -90,9 +90,11 @@ public class MessageIdCodec {
         buffer.put(pidBuffer.array(), 2, 2);
 
         buffer.flip();
+        // macAddress + pid
         processFixedStringV1 = Utilities.encodeHexString(buffer, false);
-
+        // 当前时间（创建 MessageIdCodec 的时间）距离 2021-01-01 00:00:00 的 seconds
         secondsSinceCustomEpoch = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis() - customEpochMillis());
+        // 创建 MessageIdCodec 的时间戳（单位 seconds）
         secondsStartTimestamp = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime());
         seconds = deltaSeconds();
 
@@ -127,15 +129,18 @@ public class MessageIdCodec {
 
         final ByteBuffer deltaSecondsBuffer = ByteBuffer.allocate(8);
         deltaSecondsBuffer.order(ByteOrder.BIG_ENDIAN);
+        // 当前时间距离 2021-01-01 00:00:00 的 seconds
         final long deltaSeconds = deltaSeconds();
         if (seconds != deltaSeconds) {
             seconds = deltaSeconds;
         }
         deltaSecondsBuffer.putLong(seconds);
+        // lower 4bytes
         buffer.put(deltaSecondsBuffer.array(), 4, 4);
         buffer.putInt(sequence.getAndIncrement());
 
         buffer.flip();
+        // macAddress,pid,sequence,当前时间距离 2021-01-01 00:00:00 的 seconds
         final String suffix = processFixedStringV1 + Utilities.encodeHexString(buffer, false);
         return new MessageIdImpl(MESSAGE_ID_VERSION_V1, suffix);
     }
