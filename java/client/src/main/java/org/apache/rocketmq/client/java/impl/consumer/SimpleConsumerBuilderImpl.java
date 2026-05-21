@@ -34,6 +34,7 @@ public class SimpleConsumerBuilderImpl implements SimpleConsumerBuilder {
     private ClientConfiguration clientConfiguration = null;
     private String consumerGroup = null;
     private Map<String, FilterExpression> subscriptionExpressions = new ConcurrentHashMap<>();
+    // longPollingTimeout
     private Duration awaitDuration = null;
 
     /**

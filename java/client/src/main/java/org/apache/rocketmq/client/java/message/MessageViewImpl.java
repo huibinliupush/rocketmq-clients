@@ -59,8 +59,11 @@ public class MessageViewImpl implements MessageView {
     private int deliveryAttempt;
     private final MessageQueueImpl messageQueue;
     private final Endpoints endpoints;
+    // startOffset popTime invisibleTime reviveQid 1( 0 表示 NORMAL_TOPIC，1 表示 RETRY_TOPIC，2 表示 RETRY_TOPIC_V2) brokerName queueId msgQueueOffset CommitLogOffset
     private volatile String receiptHandle;
+    // QueueOffset
     private final long offset;
+    // crc32 是否匹配
     private final boolean corrupted;
     private final long decodeTimestamp;
     private final Long transportDeliveryTimestamp;
@@ -85,6 +88,7 @@ public class MessageViewImpl implements MessageView {
         this.endpoints = null == messageQueue ? null : messageQueue.getBroker().getEndpoints();
         this.receiptHandle = checkNotNull(receiptHandle, "receiptHandle should not be null");
         this.offset = offset;
+        // crc32 是否匹配
         this.corrupted = corrupted;
         this.decodeTimestamp = System.currentTimeMillis();
         this.transportDeliveryTimestamp = transportDeliveryTimestamp;
@@ -231,6 +235,7 @@ public class MessageViewImpl implements MessageView {
         final MessageId messageId = MessageIdCodec.getInstance().decode(systemProperties.getMessageId());
         final Digest bodyDigest = systemProperties.getBodyDigest();
         byte[] body = message.getBody().toByteArray();
+        // crc32 是否匹配
         boolean corrupted = false;
         final String checksum = bodyDigest.getChecksum();
         String expectedChecksum;

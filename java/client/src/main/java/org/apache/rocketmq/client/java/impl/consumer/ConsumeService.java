@@ -42,32 +42,46 @@ public abstract class ConsumeService {
 
     protected final ClientId clientId;
     private final MessageListener messageListener;
+    // from org.apache.rocketmq.client.java.impl.consumer.PushConsumerImpl.consumptionExecutor
+    // 20 线程
     private final ThreadPoolExecutor consumptionExecutor;
+    // PushConsumerImpl
     private final MessageInterceptor messageInterceptor;
+    // from org.apache.rocketmq.client.java.impl.ClientManagerImpl.scheduler
+    // CPU 个数
     private final ScheduledExecutorService scheduler;
 
     public ConsumeService(ClientId clientId, MessageListener messageListener, ThreadPoolExecutor consumptionExecutor,
         MessageInterceptor messageInterceptor, ScheduledExecutorService scheduler) {
         this.clientId = clientId;
         this.messageListener = messageListener;
+        // from org.apache.rocketmq.client.java.impl.consumer.PushConsumerImpl.consumptionExecutor
+        // 20 线程
         this.consumptionExecutor = consumptionExecutor;
+        // PushConsumerImpl
         this.messageInterceptor = messageInterceptor;
+        // from org.apache.rocketmq.client.java.impl.ClientManagerImpl.scheduler
+        // CPU 个数
         this.scheduler = scheduler;
     }
 
     public abstract void consume(ProcessQueue pq, List<MessageViewImpl> messageViews);
 
     public ListenableFuture<ConsumeResult> consume(MessageViewImpl messageView) {
+        // 立即消费
         return consume(messageView, Duration.ZERO);
     }
-
+    // 消息提交到 consumptionExecutor（20线程）中消费
+    // 回调客户端指定的 messageListener
     public ListenableFuture<ConsumeResult> consume(MessageViewImpl messageView, Duration delay) {
+        // 20 线程
         final ListeningExecutorService executorService = MoreExecutors.listeningDecorator(consumptionExecutor);
         final ConsumeTask task = new ConsumeTask(clientId, messageListener, messageView, messageInterceptor);
         // Consume message with no delay.
         if (Duration.ZERO.compareTo(delay) >= 0) {
             return executorService.submit(task);
         }
+        // 延时消费，用于 FIFO 消息消费失败本地延时重试
         final SettableFuture<ConsumeResult> future0 = SettableFuture.create();
         scheduler.schedule(() -> {
             final ListenableFuture<ConsumeResult> future = executorService.submit(task);

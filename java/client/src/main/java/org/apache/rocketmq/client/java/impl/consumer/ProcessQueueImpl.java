@@ -96,23 +96,34 @@ class ProcessQueueImpl implements ProcessQueue {
 
     /**
      * Messages which is pending means have been cached, but are not taken by consumer dispatcher yet.
+     * 从 broker pop 下来的消息将会缓存到这里，消息不一定是 mq 属性指定的队列，broker 是根据 mq 中的 brokerName 随机选取一个队列 pop 消息
+     * 这里缓存的是同一副本集（brokerName）下的所有队列的消息
+     *
+     * MessageViewImpl 的 GC ROOT，没被消费之前一直 hold 在这里，防止被 GC
+     * 其实消费者在消费 MessageViewImpl 的时候也不是从 cache 中拿的，而是从 broker pop 出来直接消费
+     * 但需要缓存一下让 GC ROOT 引用
      */
     @GuardedBy("cachedMessageLock")
     private final List<MessageViewImpl> cachedMessages;
     private final ReadWriteLock cachedMessageLock;
-
+    // 缓存的消息 body size 总量
     private final AtomicLong cachedMessagesBytes;
-
+    // 重新消费次数
     private final AtomicLong receptionTimes;
+    // 接收到消息的总数
     private final AtomicLong receivedMessagesQuantity;
 
     private volatile long activityNanoTime = System.nanoTime();
+    // cachedMessages 满了时时候的时间戳
+    // cacheMessageCountThresholdPerQueue <= actualMessagesQuantity
     private volatile long cacheFullNanoTime = Long.MIN_VALUE;
 
     public ProcessQueueImpl(PushConsumerImpl consumer, MessageQueueImpl mq, FilterExpression filterExpression) {
         this.consumer = consumer;
         this.dropped = false;
+        // 要消费的 messageQueue
         this.mq = mq;
+        // consumer 指定的 filterExpression（消息过滤）
         this.filterExpression = filterExpression;
         this.cachedMessages = new ArrayList<>();
         this.cachedMessageLock = new ReentrantReadWriteLock();
@@ -162,8 +173,11 @@ class ProcessQueueImpl implements ProcessQueue {
     }
 
     private int getReceptionBatchSize() {
+        // maxCacheMessageCount = 1024 ，这个是缓存消息的总量（针对所有 messageQueue(所有订阅 topic)）
+        // 1024 / size
         int bufferSize = consumer.cacheMessageCountThresholdPerQueue() - this.cachedMessagesCount();
         bufferSize = Math.max(bufferSize, 1);
+        // receiveBatchSize = 32(从 proxy 获取)
         return Math.min(bufferSize, consumer.getPushConsumerSettings().getReceiveBatchSize());
     }
 
@@ -182,7 +196,7 @@ class ProcessQueueImpl implements ProcessQueue {
             RECEIVING_FAILURE_BACKOFF_DELAY;
         receiveMessageLater(delay, attemptId);
     }
-
+    // asyncWorker 执行
     private void receiveMessageLater(Duration delay, String attemptId) {
         final ClientId clientId = consumer.getClientId();
         final ScheduledExecutorService scheduler = consumer.getScheduler();
@@ -202,29 +216,33 @@ class ProcessQueueImpl implements ProcessQueue {
     private String generateAttemptId() {
         return UUID.randomUUID().toString();
     }
-
+    // asyncWorker 执行
     public void receiveMessage() {
+        // 开启新的一轮 pop
         receiveMessage(this.generateAttemptId());
     }
-
+    // asyncWorker 执行
+    // cache 满了，则由 scheduler 延时 1s 在 调用
     public void receiveMessage(String attemptId) {
         final ClientId clientId = consumer.getClientId();
         if (dropped) {
             log.info("Process queue has been dropped, no longer receive message, mq={}, clientId={}", mq, clientId);
             return;
         }
+        // cache 满了就等 1s后再 pop
         if (this.isCacheFull()) {
             log.warn("Process queue cache is full, would receive message later, mq={}, clientId={}", mq, clientId);
             receiveMessageLater(RECEIVING_BACKOFF_DELAY_WHEN_CACHE_IS_FULL, attemptId);
             return;
         }
+        // cache 没有拉满就立即 pop
         receiveMessageImmediately(attemptId);
     }
 
     private void receiveMessageImmediately() {
         receiveMessageImmediately(this.generateAttemptId());
     }
-
+    // asyncWorker 执行
     private void receiveMessageImmediately(String attemptId) {
         final ClientId clientId = consumer.getClientId();
         if (!consumer.isRunning()) {
@@ -232,19 +250,26 @@ class ProcessQueueImpl implements ProcessQueue {
             return;
         }
         try {
+            // 这里逻辑上应该是 messageQueue 所在副本集 master broker 的地址，但其实是 proxy 地址
             final Endpoints endpoints = mq.getBroker().getEndpoints();
+            // 单个 messageQueue 能够缓存的消息数量，最大为 32
             final int batchSize = this.getReceptionBatchSize();
+            // 20s(proxy端配置)
             final Duration longPollingTimeout = consumer.getPushConsumerSettings().getLongPollingTimeout();
+            // 创建 gRPC 请求
             final ReceiveMessageRequest request = consumer.wrapReceiveMessageRequest(batchSize, mq, filterExpression,
                 longPollingTimeout, attemptId);
+            // 更新 activeTime , 用于 idle 检测
             activityNanoTime = System.nanoTime();
 
             // Intercept before message reception.
             final MessageInterceptorContextImpl context = new MessageInterceptorContextImpl(MessageHookPoints.RECEIVE);
+            // inflightRequestCountInterceptor
             consumer.doBefore(context, Collections.emptyList());
-
+            // 向 proxy 拉取消息
             final ListenableFuture<ReceiveMessageResult> future = consumer.receiveMessage(request, mq,
                 longPollingTimeout);
+            // asyncWorker
             Futures.addCallback(future, new FutureCallback<ReceiveMessageResult>() {
                     @Override
                     public void onSuccess(ReceiveMessageResult result) {
@@ -257,6 +282,7 @@ class ProcessQueueImpl implements ProcessQueue {
                         consumer.doAfter(context0, generalMessages);
 
                         try {
+                            // asyncWorker
                             onReceiveMessageResult(result);
                         } catch (Throwable t) {
                             // Should never reach here.
@@ -295,7 +321,9 @@ class ProcessQueueImpl implements ProcessQueue {
     }
 
     public boolean isCacheFull() {
+        // 每个 queue 可以缓存的消息个数
         final int cacheMessageCountThresholdPerQueue = consumer.cacheMessageCountThresholdPerQueue();
+        // 当前缓存的消息个数
         final long actualMessagesQuantity = this.cachedMessagesCount();
         final ClientId clientId = consumer.getClientId();
         if (cacheMessageCountThresholdPerQueue <= actualMessagesQuantity) {
@@ -320,6 +348,7 @@ class ProcessQueueImpl implements ProcessQueue {
     public void discardMessage(MessageViewImpl messageView) {
         log.info("Discard message, mq={}, messageId={}, clientId={}", mq, messageView.getMessageId(),
             consumer.getClientId());
+        // changeInvisibleDuration
         final ListenableFuture<Void> future = nackMessage(messageView);
         future.addListener(() -> evictCache(messageView), MoreExecutors.directExecutor());
     }
@@ -344,15 +373,25 @@ class ProcessQueueImpl implements ProcessQueue {
     public long cachedMessageBytes() {
         return cachedMessagesBytes.get();
     }
-
+    // asyncWorker 执行
     private void onReceiveMessageResult(ReceiveMessageResult result) {
         final List<MessageViewImpl> messages = result.getMessageViewImpls();
         if (!messages.isEmpty()) {
+            // 缓存 pop 下来的消息
             cacheMessages(messages);
             receivedMessagesQuantity.getAndAdd(messages.size());
             consumer.getReceivedMessagesQuantity().getAndAdd(messages.size());
+            // 消费消息
+            // 消息提交到 consumptionExecutor（20线程）中消费,回调客户端指定的 messageListener
+            // 消费成功则 ackMessage,消费失败则 nackMessage,从 cache 中剔除 message
+
+            // 在 FIFO 消费场景下，必须等到前一个消息消费成功之后，才能开始下一个消息的消费
+            // 如果前一个消息没有消费成功，那么就进行重试，重试成功之后再开始下一个消息消费
+            // 如果重试一直失败，达到最大重试次数，则直接发送到死信队列，发送成功之后（不成功则一直重试直到成功）再开始下一个消息的消费
+            // 消费成功也是一样，必须等到 ackMessage 成功之后才能消费下一个消息
             consumer.getConsumeService().consume(this, messages);
         }
+        // 继续 pop
         receiveMessage();
     }
 
@@ -377,6 +416,7 @@ class ProcessQueueImpl implements ProcessQueue {
 
     @Override
     public void eraseMessage(MessageViewImpl messageView, ConsumeResult consumeResult) {
+        // stats 计数
         statsConsumptionResult(consumeResult);
         ListenableFuture<Void> future = ConsumeResult.SUCCESS.equals(consumeResult) ? ackMessage(messageView) :
             nackMessage(messageView);
@@ -385,18 +425,32 @@ class ProcessQueueImpl implements ProcessQueue {
 
     private ListenableFuture<Void> nackMessage(final MessageViewImpl messageView) {
         final int deliveryAttempt = messageView.getDeliveryAttempt();
+        // admin 创建消费者组时指定
+        // org.apache.rocketmq.remoting.protocol.subscription.ExponentialRetryPolicy
+        // org.apache.rocketmq.remoting.protocol.subscription.CustomizedRetryPolicy
+        // CustomizedRetryPolicy : 1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h
+        // ExponentialRetryPolicy: initial=5s , multiplier = 2, max = 2h
+        // 获取 deliveryAttempt 对应的重试间隔 duration
         final Duration duration = consumer.getRetryPolicy().getNextAttemptDelay(deliveryAttempt);
         final SettableFuture<Void> future0 = SettableFuture.create();
+        // 从现在开始算起，消息将在 duration 之后可见，也就是说 pushConsumer 的重试间隔时间不包括消息消费时间
+        // 从返回 ConsumeResult.FAILURE 这一时刻开始算起
+        // 向 reviveTopic 添加一个新的 checkpoint , 修改它的 InvisibleTime , 新的 popTime 为当前时间戳
+        // ack 原来的消息，防止原来的消息被重新投递，从而达到修改消息 InvisibleTime 的逻辑
         changeInvisibleDuration(messageView, duration, 1, future0);
         return future0;
     }
-
+    // 向 reviveTopic 添加一个新的 checkpoint , 修改它的 InvisibleTim
+    // ack 原来的消息，防止原来的消息被重新投递，从而达到修改消息 InvisibleTim 的逻辑
     private void changeInvisibleDuration(final MessageViewImpl messageView, final Duration duration,
         final int attempt, final SettableFuture<Void> future0) {
         final ClientId clientId = consumer.getClientId();
         final String consumerGroup = consumer.getConsumerGroup();
         final MessageId messageId = messageView.getMessageId();
+        // 逻辑上消息所在 broker 的地址，其实这里是 proxy 地址（由 proxy 转发）
         final Endpoints endpoints = messageView.getEndpoints();
+        // 向 reviveTopic 添加一个新的 checkpoint , 修改它的 InvisibleTim
+        // ack 原来的消息，防止原来的消息被重新投递，从而达到修改消息 InvisibleTim 的逻辑
         final RpcFuture<ChangeInvisibleDurationRequest, ChangeInvisibleDurationResponse> future =
             consumer.changeInvisibleDuration(messageView, duration);
         Futures.addCallback(future, new FutureCallback<ChangeInvisibleDurationResponse>() {
@@ -468,19 +522,26 @@ class ProcessQueueImpl implements ProcessQueue {
     @Override
     public ListenableFuture<Void> eraseFifoMessage(MessageViewImpl messageView, ConsumeResult consumeResult) {
         statsConsumptionResult(consumeResult);
+        // CustomizedRetryPolicy : 1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h
+        // ExponentialRetryPolicy: initial=5s , multiplier = 2, max = 2h
         final RetryPolicy retryPolicy = consumer.getRetryPolicy();
         final int maxAttempts = retryPolicy.getMaxAttempts();
         int attempt = messageView.getDeliveryAttempt();
         final MessageId messageId = messageView.getMessageId();
+        // FifoConsumeService
         final ConsumeService service = consumer.getConsumeService();
         final ClientId clientId = consumer.getClientId();
+        // 未到最大重试次数
         if (ConsumeResult.FAILURE.equals(consumeResult) && attempt < maxAttempts) {
+            // 重试间隔
             final Duration nextAttemptDelay = retryPolicy.getNextAttemptDelay(attempt);
             attempt = messageView.incrementAndGetDeliveryAttempt();
             log.debug("Prepare to redeliver the fifo message because of the consumption failure, maxAttempt={}," +
                     " attempt={}, mq={}, messageId={}, nextAttemptDelay={}, clientId={}", maxAttempts, attempt, mq,
                 messageId, nextAttemptDelay, clientId);
+            // 本地延时重试
             final ListenableFuture<ConsumeResult> future = service.consume(messageView, nextAttemptDelay);
+            // 处理重试结果
             return Futures.transformAsync(future, result -> eraseFifoMessage(messageView, result),
                 MoreExecutors.directExecutor());
         }
@@ -490,7 +551,9 @@ class ProcessQueueImpl implements ProcessQueue {
                 + "attempt={}, mq={}, messageId={}, clientId={}", maxAttempts, attempt, mq, messageId, clientId);
         }
         // Ack message or forward it to DLQ depends on consumption result.
+        // 一直重试失败，则发往死信队列， 一个 consumerGroup 对应一个死信队列 DLQTopic : %DLQ%consumerGroup
         ListenableFuture<Void> future = ok ? ackMessage(messageView) : forwardToDeadLetterQueue(messageView);
+        // ackMessage 或者发送到死信队列成功之后剔除缓存
         future.addListener(() -> evictCache(messageView), consumer.getConsumptionExecutor());
         return future;
     }
@@ -504,6 +567,7 @@ class ProcessQueueImpl implements ProcessQueue {
 
     private void forwardToDeadLetterQueue(final MessageViewImpl messageView, final int attempt,
         final SettableFuture<Void> future0) {
+        // 一个 consumerGroup 对应一个死信队列 DLQTopic : %DLQ%consumerGroup
         final RpcFuture<ForwardMessageToDeadLetterQueueRequest, ForwardMessageToDeadLetterQueueResponse> future =
             consumer.forwardMessageToDeadLetterQueue(messageView);
         final ClientId clientId = consumer.getClientId();
@@ -576,10 +640,13 @@ class ProcessQueueImpl implements ProcessQueue {
     private void ackMessage(final MessageViewImpl messageView, final int attempt, final SettableFuture<Void> future0) {
         final ClientId clientId = consumer.getClientId();
         final String consumerGroup = consumer.getConsumerGroup();
+        // storehost + commitlogOffset
         final MessageId messageId = messageView.getMessageId();
+        // 消息所在的 broker, 但其实这里还是 proxy 地址，由 proxy 转发
         final Endpoints endpoints = messageView.getEndpoints();
         final RpcFuture<AckMessageRequest, AckMessageResponse> future =
             consumer.ackMessage(messageView);
+        // 如果 ack 失败则 ackMessageLater（1 + attempt）
         Futures.addCallback(future, new FutureCallback<AckMessageResponse>() {
             @Override
             public void onSuccess(AckMessageResponse response) {
@@ -632,6 +699,7 @@ class ProcessQueueImpl implements ProcessQueue {
         final MessageId messageId = messageView.getMessageId();
         final ScheduledExecutorService scheduler = consumer.getScheduler();
         try {
+            // 延时 1s ack
             scheduler.schedule(() -> ackMessage(messageView, attempt, future),
                 ACK_MESSAGE_FAILURE_BACKOFF_DELAY.toNanos(), TimeUnit.NANOSECONDS);
         } catch (Throwable t) {

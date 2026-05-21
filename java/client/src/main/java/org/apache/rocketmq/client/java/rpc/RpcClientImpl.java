@@ -89,6 +89,7 @@ public class RpcClientImpl implements RpcClient {
     // https://grpc.io/docs/languages/java/generated-code/
     @SuppressWarnings("deprecation")
     public RpcClientImpl(Endpoints endpoints, boolean sslEnabled) throws SSLException {
+        // gRPC 负载均衡 ： https://grpc.io/docs/guides/custom-load-balancing/
         final NettyChannelBuilder channelBuilder =
             NettyChannelBuilder.forTarget(endpoints.getGrpcTarget()) // gRPC 也不会自动在所有地址之间进行轮询（Round Robin）。它通常会选择第一个可用的地址并在需要时重连到其他地址。
                 .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, CONNECT_TIMEOUT_MILLIS)//3s
@@ -171,11 +172,16 @@ public class RpcClientImpl implements RpcClient {
         this.activityNanoTime = System.nanoTime();
         SettableFuture<List<ReceiveMessageResponse>> future = SettableFuture.create();
         List<ReceiveMessageResponse> responses = new ArrayList<>();
+        // 服务端 stream rpc
+        // rpc ReceiveMessage(ReceiveMessageRequest) returns (stream ReceiveMessageResponse)
         stub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata)).withExecutor(executor)
             .withDeadlineAfter(duration.toNanos(), TimeUnit.NANOSECONDS)
             .receiveMessage(request, new StreamObserver<ReceiveMessageResponse>() {
+                // see : org.apache.rocketmq.proxy.grpc.v2.consumer.ReceiveMessageResponseStreamWriter#writeAndComplete(org.apache.rocketmq.proxy.common.ProxyContext, apache.rocketmq.v2.ReceiveMessageRequest, org.apache.rocketmq.client.consumer.PopResult)
                 @Override
                 public void onNext(ReceiveMessageResponse response) {
+                    // proxy 端先回发送 ReceiveMessageResponse with status
+                    // 然后一条一条的发送 ReceiveMessageResponse with message
                     responses.add(response);
                 }
 
@@ -191,7 +197,11 @@ public class RpcClientImpl implements RpcClient {
             });
         return future;
     }
-
+    // 向 reviveTopic 发送 ack 消息， tag 为 ACK_TAG， ack 之后的消息就不会复活了
+    // 但是这里 ack 消息并不会推进原来 topic 对应 queue 的 commitOffset
+    // pop 消息的 offset 由 broker 的 popMessageProcessor 负责推进，拉一批往前推一批
+    // 由于是消费者组并发 pop,所以需要保证其他消费者可以 pop 的接下来的消息，offset 只能一直向前推
+    // 而 ack pop message 只能保证它不会被重试
     @Override
     public ListenableFuture<AckMessageResponse> ackMessage(Metadata metadata,
         AckMessageRequest request, Executor executor, Duration duration) {
@@ -199,7 +209,8 @@ public class RpcClientImpl implements RpcClient {
         return futureStub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata)).withExecutor(executor)
             .withDeadlineAfter(duration.toNanos(), TimeUnit.NANOSECONDS).ackMessage(request);
     }
-
+    // 添加一个新的 checkpoint , 修改它的 InvisibleTim
+    // ack 原来的消息，防止原来的消息被重新投递，从而达到修改消息 InvisibleTim 的逻辑
     @Override
     public ListenableFuture<ChangeInvisibleDurationResponse> changeInvisibleDuration(Metadata metadata,
         ChangeInvisibleDurationRequest request, Executor executor,

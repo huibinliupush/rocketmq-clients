@@ -32,6 +32,8 @@ public interface MessageListener {
      * <p>You should process the {@link MessageView} and return the corresponding {@link ConsumeResult}.
      * The consumption is successful only when {@link ConsumeResult#SUCCESS } is returned, null pointer is returned
      * or exception is thrown would cause message consumption failure too.
+     *
+     * 由 consumptionExecutor（20线程）并发调用
      */
     ConsumeResult consume(MessageView messageView);
 }

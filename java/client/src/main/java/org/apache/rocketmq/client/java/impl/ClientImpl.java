@@ -140,7 +140,7 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     @GuardedBy("sessionsLock")
     private final Map<Endpoints, ClientSessionImpl> sessionsTable;
     private final ReadWriteLock sessionsLock;
-
+    // push consumer : inflightRequestCountInterceptor
     private final CompositedMessageInterceptor compositedMessageInterceptor;
 
     public ClientImpl(ClientConfiguration clientConfiguration, Set<String> topics) {
@@ -200,6 +200,10 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     protected void startUp() throws Exception {
         log.info("Begin to start the rocketmq client, clientId={}", clientId);
         // 回调 org.apache.rocketmq.client.java.impl.ClientManagerImpl.startUp
+        // 用远程配置中的 isConsumeMessageOrderly，RetryMaxTimes，GroupRetryPolicy 覆盖本地配置
+        // 剩下的订阅配置由本地 setting 配置决定，admin 创建的 SubscriptionGroupConfig 主要用来规定消费行为
+        // 具体订阅消费哪些数据是可变的，所以由客户端的 setting 决定，比如订阅那些 topic 都是随时可变的只能由消费者灵活制定
+        // admin 在创建消费者组的时候无法判定要订阅哪些 topic, 无法灵活改变，所以这部分订阅配置由消费者指定
         this.clientManager.startAsync().awaitRunning();
         // Fetch topic route from remote.
         log.info("Begin to fetch topic(s) route data from remote during client startup, clientId={}, topics={}",
@@ -256,6 +260,7 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
 
     protected void addMessageInterceptor(MessageInterceptor messageInterceptor) {
         if (!this.isRunning()) {
+            // inflightRequestCountInterceptor
             compositedMessageInterceptor.addInterceptor(messageInterceptor);
         }
     }
@@ -263,6 +268,7 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     @Override
     public void doBefore(MessageInterceptorContext context, List<GeneralMessage> generalMessages) {
         try {
+            // inflightRequestCountInterceptor
             compositedMessageInterceptor.doBefore(context, generalMessages);
         } catch (Throwable t) {
             // Should never reach here.
@@ -290,6 +296,8 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
     public StreamObserver<TelemetryCommand> telemetry(Endpoints endpoints,
         StreamObserver<TelemetryCommand> observer) throws ClientException {
         try {
+            // 双向流
+            // rpc Telemetry(stream TelemetryCommand) returns (stream TelemetryCommand) {}
             return clientManager.telemetry(endpoints, TELEMETRY_TIMEOUT, observer);
         } catch (ClientException e) {
             throw e;
@@ -345,25 +353,48 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
      * @param endpoints remote endpoints.
      * @param settings  settings received from remote.
      */
+    // 用远程配置中的 isConsumeMessageOrderly，RetryMaxTimes，GroupRetryPolicy 覆盖本地配置
+    // 剩下的订阅配置由本地 setting 配置决定，admin 创建的 SubscriptionGroupConfig 主要用来规定消费行为
+    // 具体订阅消费哪些数据是可变的，所以由客户端的 setting 决定，比如订阅那些 topic 都是随时可变的只能由消费者灵活制定
+    // admin 在创建消费者组的时候无法判定要订阅哪些 topic, 无法灵活改变，所以这部分订阅配置由消费者指定
     @Override
     public final void onSettingsCommand(Endpoints endpoints, apache.rocketmq.v2.Settings settings) {
         final Metric metric = new Metric(settings.getMetric());
         clientMeterManager.reset(metric);
+        // 从远程 broker 获取到的 consumerGroup 订阅关系配置（由 admin 创建消费者组的时候在指定 broker 填充）
+        // org.apache.rocketmq.proxy.grpc.v2.common.GrpcClientSettingsManager#mergeSubscriptionData(apache.rocketmq.v2.Settings, org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig)
+        // 用远程配置中的 isConsumeMessageOrderly，RetryMaxTimes，GroupRetryPolicy 覆盖本地配置
+        // 剩下的订阅配置由本地 setting 配置决定，admin 创建的 SubscriptionGroupConfig 主要用来规定消费行为
+        // 具体订阅消费哪些数据是可变的，所以由客户端的 setting 决定，比如订阅那些 topic 都是随时可变的只能由消费者灵活制定
+        // admin 在创建消费者组的时候无法判定要订阅哪些 topic, 无法灵活改变，所以这部分订阅配置由消费者指定
         this.getSettings().sync(settings);
     }
 
     /**
      * @see Client#syncSettings()
      */
+    // 用远程配置中的 isConsumeMessageOrderly，RetryMaxTimes，GroupRetryPolicy 覆盖本地配置
+    // 剩下的订阅配置由本地 setting 配置决定，admin 创建的 SubscriptionGroupConfig 主要用来规定消费行为
+    // 具体订阅消费哪些数据是可变的，所以由客户端的 setting 决定，比如订阅那些 topic 都是随时可变的只能由消费者灵活制定
+    // admin 在创建消费者组的时候无法判定要订阅哪些 topic, 无法灵活改变，所以这部分订阅配置由消费者指定
     @Override
     public void syncSettings() {
-        // PublishingSettings
+        // procuder : PublishingSettings
         // see : org.apache.rocketmq.client.java.impl.producer.ProducerImpl.ProducerImpl
+
+        // pushConsumer : pushSubscriptionSettings 本地消费者指定的订阅配置
         final apache.rocketmq.v2.Settings settings = getSettings().toProtobuf();
         final TelemetryCommand command = TelemetryCommand.newBuilder().setSettings(settings).build();
+        // 获取订阅的 topic 路由中所有 messageQueue 所在 broker 的 endpoints
         final Set<Endpoints> totalRouteEndpoints = getTotalRouteEndpoints();
+        // 从远程 broker 获取到的 consumerGroup 订阅关系配置（由 admin 创建消费者组的时候在指定 broker 填充）
+        // 用远程 broker 中的配置填充 pushSubscriptionSettings
         for (Endpoints endpoints : totalRouteEndpoints) {
             try {
+                // 用远程配置中的 isConsumeMessageOrderly，RetryMaxTimes，GroupRetryPolicy 覆盖本地配置
+                // 剩下的订阅配置由本地 setting 配置决定，admin 创建的 SubscriptionGroupConfig 主要用来规定消费行为
+                // 具体订阅消费哪些数据是可变的，所以由客户端的 setting 决定，比如订阅那些 topic 都是随时可变的只能由消费者灵活制定
+                // admin 在创建消费者组的时候无法判定要订阅哪些 topic, 无法灵活改变，所以这部分订阅配置由消费者指定
                 telemetry(endpoints, command);
             } catch (Throwable t) {
                 log.error("Failed to telemeter settings, clientId={}, endpoints={}", clientId, endpoints, t);
@@ -373,7 +404,10 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
 
     public void telemetry(Endpoints endpoints, TelemetryCommand command) {
         try {
+            // 因为 telemetry 定义的是双向流，所以 gRPC 请求方式和之前的 unary rpc 不同
+            // 这里用 ClientSessionImpl 来封装双向流的 request , response StreamObserver
             final ClientSessionImpl clientSession = getClientSession(endpoints);
+            // 用 requestStreamObserver 发送 TelemetryCommand
             clientSession.write(command);
         } catch (Throwable t) {
             log.error("Failed to fire write telemetry command, clientId={}, endpoints={}", clientId, endpoints, t);
@@ -415,6 +449,7 @@ public abstract class ClientImpl extends AbstractIdleService implements Client, 
             if (null != session) {
                 return session;
             }
+            // 里边封装了需要发送数据的 requestObserver
             session = new ClientSessionImpl(this, clientConfiguration.getRequestTimeout(), endpoints);
             sessionsTable.put(endpoints, session);
             return session;

@@ -39,6 +39,7 @@ import org.slf4j.LoggerFactory;
 @SuppressWarnings("UnstableApiUsage")
 class FifoConsumeService extends ConsumeService {
     private static final Logger log = LoggerFactory.getLogger(FifoConsumeService.class);
+    // false
     private final boolean enableFifoConsumeAccelerator;
 
     public FifoConsumeService(ClientId clientId, MessageListener messageListener,
@@ -47,9 +48,12 @@ class FifoConsumeService extends ConsumeService {
         super(clientId, messageListener, consumptionExecutor, messageInterceptor, scheduler);
         this.enableFifoConsumeAccelerator = enableFifoConsumeAccelerator;
     }
-
+    // 在 FIFO 消费场景下，必须等到前一个消息消费成功之后，才能开始下一个消息的消费
+    // 如果前一个消息没有消费成功，那么就进行重试，重试成功之后再开始下一个消息消费
+    // 如果重试一直失败，达到最大重试次数，则直接发送到死信队列，发送完毕之后再开始下一个消息的消费
     @Override
     public void consume(ProcessQueue pq, List<MessageViewImpl> messageViews) {
+        // false
         if (!enableFifoConsumeAccelerator || messageViews.size() <= 1) {
             consumeIteratively(pq, messageViews.iterator());
             return;
@@ -72,7 +76,10 @@ class FifoConsumeService extends ConsumeService {
         messageViewsGroupByMessageGroup.values().forEach(list -> consumeIteratively(pq, list.iterator()));
         consumeIteratively(pq, messageViewsWithoutMessageGroup.iterator());
     }
-
+    // 在 FIFO 消费场景下，必须等到前一个消息消费成功之后，才能开始下一个消息的消费
+    // 如果前一个消息没有消费成功，那么就进行重试，重试成功之后再开始下一个消息消费
+    // 如果重试一直失败，达到最大重试次数，则直接发送到死信队列，发送成功之后（不成功则一直重试直到成功）再开始下一个消息的消费
+    // 消费成功也是一样，必须等到 ackMessage 成功之后才能消费下一个消息
     public void consumeIteratively(ProcessQueue pq, Iterator<MessageViewImpl> iterator) {
         if (!iterator.hasNext()) {
             return;
@@ -82,13 +89,22 @@ class FifoConsumeService extends ConsumeService {
             // Discard corrupted message.
             log.error("Message is corrupted for FIFO consumption, prepare to discard it, mq={}, messageId={}, "
                 + "clientId={}", pq.getMessageQueue(), messageView.getMessageId(), clientId);
+            // 直接发送到死信队列，从缓存中剔除
             pq.discardFifoMessage(messageView);
+            // 继续往后消费 FIFO 消息
             consumeIteratively(pq, iterator);
             return;
         }
+        // 按照顺序消费第一个 FIFO 消息
         final ListenableFuture<ConsumeResult> future0 = consume(messageView);
+        // 处理消费结果
         ListenableFuture<Void> future = Futures.transformAsync(future0, result -> pq.eraseFifoMessage(messageView,
             result), MoreExecutors.directExecutor());
+        // 第一个消费完之后，在接着消费下一个 FIFO 消息
+        // 在 FIFO 消费场景下，必须等到前一个消息消费成功之后，才能开始下一个消息的消费
+        // 如果前一个消息没有消费成功，那么就进行重试，重试成功之后再开始下一个消息消费
+        // 如果重试一直失败，达到最大重试次数，则直接发送到死信队列，发送成功之后（不成功则一直重试直到成功）再开始下一个消息的消费
+        // 消费成功也是一样，必须等到 ackMessage 成功之后才能消费下一个消息
         future.addListener(() -> consumeIteratively(pq, iterator), MoreExecutors.directExecutor());
     }
 }

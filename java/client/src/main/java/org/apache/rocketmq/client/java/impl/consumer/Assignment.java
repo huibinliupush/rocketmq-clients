@@ -22,6 +22,9 @@ import com.google.common.base.Objects;
 import org.apache.rocketmq.client.java.route.MessageQueueImpl;
 
 public class Assignment {
+    // 向 proxy 获取 topic 所在副本集中的所有可读 queue
+    // 如果是 fifo 则收集所有副本集中的所有可读 queue
+    // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
     private final MessageQueueImpl messageQueue;
 
     public Assignment(MessageQueueImpl messageQueue) {

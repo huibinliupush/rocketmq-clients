@@ -67,6 +67,9 @@ public class PushConsumerExample {
             .setSubscriptionExpressions(Collections.singletonMap(topic, filterExpression))
             .setMessageListener(messageView -> {
                 // Handle the received message and return consume result.
+                // 注意这里是由 push consumer sdk 内部的 20 个 consume 线程并发调用 MessageListener 的
+                // 消息 pop 下来之后会一个一个的提交给这 20 个线程并发执行
+                // FIFO 消息是提交一个执行完之后，在向提交第二个，一个一个的提交执行
                 log.info("Consume message={}", messageView);
                 return ConsumeResult.SUCCESS;
             })

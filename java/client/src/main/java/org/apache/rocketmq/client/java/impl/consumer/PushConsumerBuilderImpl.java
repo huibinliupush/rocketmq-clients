@@ -37,6 +37,9 @@ public class PushConsumerBuilderImpl implements PushConsumerBuilder {
     private ClientConfiguration clientConfiguration = null;
     private String consumerGroup = null;
     private Map<String, FilterExpression> subscriptionExpressions = new ConcurrentHashMap<>();
+    // 注意这里是由 push consumer sdk 内部的 20 个 consume 线程并发调用 MessageListener 的
+    // 消息 pop 下来之后会一个一个的提交给这 20 个线程并发执行
+    // FIFO 消息是提交一个执行完之后，在向提交第二个，一个一个的提交执行
     private MessageListener messageListener = null;
     private int maxCacheMessageCount = 1024;
     private int maxCacheMessageSizeInBytes = 64 * 1024 * 1024;
@@ -78,6 +81,9 @@ public class PushConsumerBuilderImpl implements PushConsumerBuilder {
     /**
      * @see PushConsumerBuilder#setMessageListener(MessageListener)
      */
+    // 注意这里是由 push consumer sdk 内部的 20 个 consume 线程并发调用 MessageListener 的
+    // 消息 pop 下来之后会一个一个的提交给这 20 个线程并发执行
+    // FIFO 消息是提交一个执行完之后，在向提交第二个，一个一个的提交执行
     @Override
     public PushConsumerBuilder setMessageListener(MessageListener messageListener) {
         this.messageListener = checkNotNull(messageListener, "messageListener should not be null");
@@ -135,6 +141,7 @@ public class PushConsumerBuilderImpl implements PushConsumerBuilder {
         final PushConsumerImpl pushConsumer = new PushConsumerImpl(clientConfiguration, consumerGroup,
             subscriptionExpressions, messageListener, maxCacheMessageCount, maxCacheMessageSizeInBytes,
             consumptionThreadCount, enableFifoConsumeAccelerator);
+        // 启动 pushConsumer
         pushConsumer.startAsync().awaitRunning();
         return pushConsumer;
     }

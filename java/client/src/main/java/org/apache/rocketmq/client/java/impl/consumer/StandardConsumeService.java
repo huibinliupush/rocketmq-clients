@@ -41,21 +41,30 @@ public class StandardConsumeService extends ConsumeService {
         ScheduledExecutorService scheduler) {
         super(clientId, messageListener, consumptionExecutor, messageInterceptor, scheduler);
     }
-
+    // asyncWorker 执行
+    // 消息提交到 consumptionExecutor（20线程）中消费,回调客户端指定的 messageListener
+    // 消费成功则 ackMessage,消费失败则 nackMessage,从 cache 中剔除 message
     @Override
     public void consume(ProcessQueue pq, List<MessageViewImpl> messageViews) {
         for (MessageViewImpl messageView : messageViews) {
             // Discard corrupted message.
-            if (messageView.isCorrupted()) {
+            if (messageView.isCorrupted()) { // CRC32 校验失败
                 log.error("Message is corrupted for standard consumption, prepare to discard it, mq={}, "
                     + "messageId={}, clientId={}", pq.getMessageQueue(), messageView.getMessageId(), clientId);
+                // changeInvisibleDuration
                 pq.discardMessage(messageView);
                 continue;
             }
+            // 消息提交到 consumptionExecutor（20线程）中消费
+            // 回调客户端指定的 messageListener
             final ListenableFuture<ConsumeResult> future = consume(messageView);
             Futures.addCallback(future, new FutureCallback<ConsumeResult>() {
+                // consumptionExecutor（20线程）执行
                 @Override
                 public void onSuccess(ConsumeResult consumeResult) {
+                    // 消费成功则 ackMessage
+                    // 消费失败则 nackMessage
+                    // 从 cache 中剔除 message
                     pq.eraseMessage(messageView, consumeResult);
                 }
 

@@ -37,6 +37,7 @@ public class SubscriptionLoadBalancer {
     private final AtomicInteger index;
     /**
      * Message queues to receive message.
+     * 某个 topic 下所有副本集 master 中的可读队列
      */
     private final ImmutableList<MessageQueueImpl> messageQueues;
 

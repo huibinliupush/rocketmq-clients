@@ -277,6 +277,7 @@ public class ClientManagerImpl extends ClientManager {
             final Metadata metadata = client.sign();
             final Context context = new Context(endpoints, metadata);
             final RpcClient rpcClient = getRpcClient(endpoints);
+            // duration : longPollingTimeout + RequestTimeout
             final ListenableFuture<List<ReceiveMessageResponse>> future =
                 rpcClient.receiveMessage(metadata, request, asyncWorker, duration);
             return new RpcFuture<>(context, request, future);
@@ -284,7 +285,11 @@ public class ClientManagerImpl extends ClientManager {
             return new RpcFuture<>(t);
         }
     }
-
+    // 向 reviveTopic 发送 ack 消息， tag 为 ACK_TAG， ack 之后的消息就不会复活了
+    // 但是这里 ack 消息并不会推进原来 topic 对应 queue 的 commitOffset
+    // pop 消息的 offset 由 broker 的 popMessageProcessor 负责推进，拉一批往前推一批
+    // 由于是消费者组并发 pop,所以需要保证其他消费者可以 pop 的接下来的消息，offset 只能一直向前推
+    // 而 ack pop message 只能保证它不会被重试
     @Override
     public RpcFuture<AckMessageRequest, AckMessageResponse> ackMessage(Endpoints endpoints, AckMessageRequest request,
         Duration duration) {
@@ -299,7 +304,8 @@ public class ClientManagerImpl extends ClientManager {
             return new RpcFuture<>(t);
         }
     }
-
+    // 向 reviveTopic 添加一个新的 checkpoint , 修改它的 InvisibleTim
+    // ack 原来的消息，防止原来的消息被重新投递，从而达到修改消息 InvisibleTim 的逻辑
     @Override
     public RpcFuture<ChangeInvisibleDurationRequest, ChangeInvisibleDurationResponse>
     changeInvisibleDuration(Endpoints endpoints, ChangeInvisibleDurationRequest request,
@@ -444,13 +450,21 @@ public class ClientManagerImpl extends ClientManager {
             LOG_STATS_PERIOD.toNanos(),
             TimeUnit.NANOSECONDS
         );
-
+        // 向远端 broker 同步 producer, consumer 相关配置
+        // 这里应该先 syncSettings 然后在启动定时任务
+        // 因为后续创建 consumerService 的时候需要知道 topic 是否为 fifo(这个信息是通过 syncSetting 获取的)
         scheduler.scheduleWithFixedDelay(
             () -> {
                 try {
                     // 每 5 分钟
                     // PublishingSettings
                     // see : org.apache.rocketmq.client.java.impl.producer.ProducerImpl.ProducerImpl
+                    // 从远程 broker 获取到的 consumerGroup 订阅关系配置（由 admin 创建消费者组的时候在指定 broker 填充）
+                    // 用远程 broker 中的配置填充 pushSubscriptionSettings
+                    // 用远程配置中的 isConsumeMessageOrderly，RetryMaxTimes，GroupRetryPolicy 覆盖本地配置
+                    // 剩下的订阅配置由本地 setting 配置决定，admin 创建的 SubscriptionGroupConfig 主要用来规定消费行为
+                    // 具体订阅消费哪些数据是可变的，所以由客户端的 setting 决定，比如订阅那些 topic 都是随时可变的只能由消费者灵活制定
+                    // admin 在创建消费者组的时候无法判定要订阅哪些 topic, 无法灵活改变，所以这部分订阅配置由消费者指定
                     client.syncSettings();
                 } catch (Throwable t) {
                     log.error("Exception raised during the setting synchronization, clientId={}", clientId, t);

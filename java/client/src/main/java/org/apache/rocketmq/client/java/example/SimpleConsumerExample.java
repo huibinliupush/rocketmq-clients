@@ -79,6 +79,8 @@ public class SimpleConsumerExample {
         Duration invisibleDuration = Duration.ofSeconds(15);
         // Receive message, multi-threading is more recommended.
         do {
+            // 每次调用该方法，会轮询出一个 topic, pop 该  topic 下的消息
+            // 下一次调用会轮询出另一个 topic
             final List<MessageView> messages = consumer.receive(maxMessageNum, invisibleDuration);
             log.info("Received {} message(s)", messages.size());
             for (MessageView message : messages) {

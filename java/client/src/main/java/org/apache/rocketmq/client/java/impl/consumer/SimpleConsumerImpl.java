@@ -69,6 +69,7 @@ class SimpleConsumerImpl extends ConsumerImpl implements SimpleConsumer {
     private final AtomicInteger topicIndex;
 
     private final Map<String /* topic */, FilterExpression> subscriptionExpressions;
+    // 缓存某个 topic 下所有副本集 master 中的可读队列
     private final ConcurrentMap<String /* topic */, SubscriptionLoadBalancer> subscriptionRouteDataCache;
 
     public SimpleConsumerImpl(ClientConfiguration clientConfiguration, String consumerGroup, Duration awaitDuration,
@@ -165,6 +166,8 @@ class SimpleConsumerImpl extends ConsumerImpl implements SimpleConsumer {
      */
     @Override
     public List<MessageView> receive(int maxMessageNum, Duration invisibleDuration) throws ClientException {
+        // 每次调用该方法，会轮询出一个 topic, pop 该  topic 下的消息
+        // 下一次调用会轮询出另一个 topic
         final ListenableFuture<List<MessageView>> future = receive0(maxMessageNum, invisibleDuration);
         return handleClientFuture(future);
     }
@@ -177,7 +180,8 @@ class SimpleConsumerImpl extends ConsumerImpl implements SimpleConsumer {
         final ListenableFuture<List<MessageView>> future = receive0(maxMessageNum, invisibleDuration);
         return FutureConverter.toCompletableFuture(future);
     }
-
+    // 每次调用该方法，会轮询出一个 topic, pop 该  topic 下的消息
+    // 下一次调用会轮询出另一个 topic
     public ListenableFuture<List<MessageView>> receive0(int maxMessageNum, Duration invisibleDuration) {
         if (!this.isRunning()) {
             log.error("Unable to receive message because simple consumer is not running, state={}, clientId={}",
@@ -190,16 +194,21 @@ class SimpleConsumerImpl extends ConsumerImpl implements SimpleConsumer {
             return Futures.immediateFailedFuture(e);
         }
         final HashMap<String, FilterExpression> copy = new HashMap<>(subscriptionExpressions);
+        // 订阅的所有 topic
         final ArrayList<String> topics = new ArrayList<>(copy.keySet());
         // All topic is subscribed.
         if (topics.isEmpty()) {
             final IllegalArgumentException e = new IllegalArgumentException("There is no topic to receive message");
             return Futures.immediateFailedFuture(e);
         }
+        // 轮询出一个 topic
         final String topic = topics.get(IntMath.mod(topicIndex.getAndIncrement(), topics.size()));
+        // topic 对应的订阅关系
         final FilterExpression filterExpression = copy.get(topic);
+        // 某个 topic 下所有副本集 master 中的可读队列
         final ListenableFuture<SubscriptionLoadBalancer> routeFuture = getSubscriptionLoadBalancer(topic);
         final ListenableFuture<ReceiveMessageResult> future0 = Futures.transformAsync(routeFuture, result -> {
+            // 轮询获取一个 messageQueue
             final MessageQueueImpl mq = result.takeMessageQueue();
             final ReceiveMessageRequest request = wrapReceiveMessageRequest(maxMessageNum, mq, filterExpression,
                 invisibleDuration, awaitDuration);

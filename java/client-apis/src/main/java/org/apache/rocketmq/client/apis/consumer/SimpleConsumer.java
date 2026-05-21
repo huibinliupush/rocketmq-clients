@@ -107,6 +107,8 @@ public interface SimpleConsumer extends Closeable {
      *                          invisible to other consumers unless timeout.
      * @return list of message view.
      */
+    // 每次调用该方法，会轮询出一个 topic, pop 该  topic 下的消息
+    // 下一次调用会轮询出另一个 topic
     List<MessageView> receive(int maxMessageNum, Duration invisibleDuration) throws ClientException;
 
     /**

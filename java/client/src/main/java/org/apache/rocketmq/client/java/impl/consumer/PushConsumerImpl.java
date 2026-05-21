@@ -91,18 +91,30 @@ import org.slf4j.LoggerFactory;
 @SuppressWarnings({"UnstableApiUsage", "NullableProblems"})
 class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
     private static final Logger log = LoggerFactory.getLogger(PushConsumerImpl.class);
-
+    // 成功消费消息总数
     final AtomicLong consumptionOkQuantity;
+    // 消息消费失败总数
     final AtomicLong consumptionErrorQuantity;
 
     private final ClientConfiguration clientConfiguration;
     private final PushSubscriptionSettings pushSubscriptionSettings;
     private final String consumerGroup;
+    // 消费者组订阅的所有 topic 以及对应的 FilterExpression
     private final Map<String /* topic */, FilterExpression> subscriptionExpressions;
+    // 向 proxy 获取 topic 所在副本集中的所有可读 queue
+    // 如果是 fifo 则收集所有副本集中的所有可读 queue
+    // 非 fifo 则每个副本集只收集一个 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
     private final ConcurrentMap<String /* topic */, Assignments> cacheAssignments;
+    // 由 consumptionExecutor 并发执行
+    // 注意这里是由 push consumer sdk 内部的 20 个 consume 线程并发调用 MessageListener 的
+    // 消息 pop 下来之后会一个一个的提交给这 20 个线程并发执行
+    // FIFO 消息是提交一个执行完之后，在向提交第二个，一个一个的提交执行
     private final MessageListener messageListener;
+    // 1024 , 这个是缓存消息的总量（针对所有 messageQueue(所有订阅 topic)）
     private final int maxCacheMessageCount;
+    // 64M
     private final int maxCacheMessageSizeInBytes;
+    // false
     private final boolean enableFifoConsumeAccelerator;
     private final InflightRequestCountInterceptor inflightRequestCountInterceptor;
 
@@ -112,11 +124,15 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
     private final AtomicLong receptionTimes;
     /**
      * Indicates the quantity of received messages.
+     * consumer 接收到消息的总数
      */
     private final AtomicLong receivedMessagesQuantity;
-
+    // 20 线程
     private final ThreadPoolExecutor consumptionExecutor;
+    // 缓存订阅的 topic 下所有的有效 messageQueue(所有订阅 topic)
+    // 这里缓存的是所有订阅 topic 的可读 message queue
     private final ConcurrentMap<MessageQueueImpl, ProcessQueue> processQueueTable;
+    // FifoConsumeService or StandardConsumeService ?
     private ConsumeService consumeService;
 
     private volatile ScheduledFuture<?> scanAssignmentsFuture;
@@ -132,14 +148,22 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
         super(clientConfiguration, consumerGroup, subscriptionExpressions.keySet());
         this.clientConfiguration = clientConfiguration;
         Resource groupResource = new Resource(clientConfiguration.getNamespace(), consumerGroup);
+        // consumer 一些信息
         this.pushSubscriptionSettings = new PushSubscriptionSettings(clientConfiguration.getNamespace(), clientId,
             endpoints, groupResource, clientConfiguration.getRequestTimeout(), subscriptionExpressions);
         this.consumerGroup = consumerGroup;
+        // 消费者组订阅的所有 topic 以及对应的 FilterExpression
         this.subscriptionExpressions = subscriptionExpressions;
         this.cacheAssignments = new ConcurrentHashMap<>();
+        // 注意这里是由 push consumer sdk 内部的 20 个 consume 线程并发调用 MessageListener 的
+        // 消息 pop 下来之后会一个一个的提交给这 20 个线程并发执行
+        // FIFO 消息是提交一个执行完之后，在向提交第二个，一个一个的提交执行
         this.messageListener = messageListener;
+        // 1024
         this.maxCacheMessageCount = maxCacheMessageCount;
+        // 64M
         this.maxCacheMessageSizeInBytes = maxCacheMessageSizeInBytes;
+        // false
         this.enableFifoConsumeAccelerator = enableFifoConsumeAccelerator;
 
         this.receptionTimes = new AtomicLong(0);
@@ -150,7 +174,7 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
         this.processQueueTable = new ConcurrentHashMap<>();
 
         this.consumptionExecutor = new ThreadPoolExecutor(
-            consumptionThreadCount,
+            consumptionThreadCount, // 20
             consumptionThreadCount,
             60,
             TimeUnit.SECONDS,
@@ -174,12 +198,20 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
             log.info("Begin to start the rocketmq push consumer, clientId={}", clientId);
             GaugeObserver gaugeObserver = new ProcessQueueGaugeObserver(processQueueTable, clientId, consumerGroup);
             this.clientMeterManager.setGaugeObserver(gaugeObserver);
+            // 和生产者的逻辑一样，start clientImpl
+            // 用远程配置中的 isConsumeMessageOrderly，RetryMaxTimes，GroupRetryPolicy 覆盖本地配置
+            // 剩下的订阅配置由本地 setting 配置决定，admin 创建的 SubscriptionGroupConfig 主要用来规定消费行为
+            // 具体订阅消费哪些数据是可变的，所以由客户端的 setting 决定，比如订阅那些 topic 都是随时可变的只能由消费者灵活制定
+            // admin 在创建消费者组的时候无法判定要订阅哪些 topic, 无法灵活改变，所以这部分订阅配置由消费者指定
             super.startUp();
+            // availableProcessors
             final ScheduledExecutorService scheduler = this.getClientManager().getScheduler();
+            // FifoConsumeService or StandardConsumeService ?
             this.consumeService = createConsumeService();
             // Scan assignments periodically.
             scanAssignmentsFuture = scheduler.scheduleWithFixedDelay(() -> {
                 try {
+                    // 每 5s send receive request
                     scanAssignments();
                 } catch (Throwable t) {
                     log.error("Exception raised while scanning the load assignments, clientId={}", clientId, t);
@@ -242,7 +274,10 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
     }
 
     private ConsumeService createConsumeService() {
+        // availableProcessors
         final ScheduledExecutorService scheduler = this.getClientManager().getScheduler();
+        // fifo 标识由 org.apache.rocketmq.client.java.impl.ClientManagerImpl.startUp 中启动的定时任务 syncSetting 进行设置
+        // pushSubscriptionSettings 会在 syncSetting 中向远端 broker 同步 consumerGroup 的订阅配置（由 admin 创建消费者组时在指定broker填充）
         if (pushSubscriptionSettings.isFifo()) {
             log.info("Create FIFO consume service, consumerGroup={}, clientId={}, enableFifoConsumeAccelerator={}",
                 consumerGroup, clientId, enableFifoConsumeAccelerator);
@@ -311,6 +346,7 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
             if (topicRouteData.getTotalEndpoints().contains(this.getEndpoints())) {
                 return Futures.immediateFuture(this.getEndpoints());
             }
+            // 随便选一个 topic 所在副本集的 master
             Endpoints endpoints = topicRouteData.pickEndpointsToQueryAssignments();
             return Futures.immediateFuture(endpoints);
         }, MoreExecutors.directExecutor());
@@ -324,17 +360,25 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
         return QueryAssignmentRequest.newBuilder().setTopic(topicResource)
             .setEndpoints(endpoints.toProtobuf()).setGroup(getProtobufGroup()).build();
     }
-
+    // 向 proxy 获取 topic 所在副本集中的所有可读 queue
+    // 如果是 fifo 则收集所有副本集中的所有可读 queue
+    // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
     ListenableFuture<Assignments> queryAssignment(final String topic) {
         final ListenableFuture<Endpoints> future0 = pickEndpointsToQueryAssignments(topic);
         return Futures.transformAsync(future0, endpoints -> {
             final QueryAssignmentRequest request = wrapQueryAssignmentRequest(topic);
             final Duration requestTimeout = clientConfiguration.getRequestTimeout();
+            // 向 proxy 获取 topic 所在副本集中的所有可读 queue
+            // 如果是 fifo 则收集所有副本集中的所有可读 queue
+            // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
             final RpcFuture<QueryAssignmentRequest, QueryAssignmentResponse> future1 =
                 this.getClientManager().queryAssignment(endpoints, request, requestTimeout);
             return Futures.transformAsync(future1, response -> {
                 final Status status = response.getStatus();
                 StatusChecker.check(status, future1);
+                // 向 proxy 获取 topic 所在副本集中的所有可读 queue
+                // 如果是 fifo 则收集所有副本集中的所有可读 queue
+                // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
                 final List<Assignment> assignmentList = response.getAssignmentsList().stream().map(assignment ->
                     new Assignment(new MessageQueueImpl(assignment.getMessageQueue()))).collect(Collectors.toList());
                 final Assignments assignments = new Assignments(assignmentList);
@@ -382,60 +426,78 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
             .setClientType(ClientType.PUSH_CONSUMER).build();
     }
 
-
+    // 订阅的 topic
+    // assignments : topic 所在副本集中所有可读的 messageQueue, 对于非 fifo 来说，这里每个副本集只收集一个 queue(id=-1), 后续到了 broker 在随机选取 queue
+    // filterExpression : 用户指定的消费 topic 对应的 filterExpression
     @VisibleForTesting
     void syncProcessQueue(String topic, Assignments assignments, FilterExpression filterExpression) {
+        // 最新的订阅 topic 可读messagequeue
         Set<MessageQueueImpl> latest = new HashSet<>();
-
+        // 获取订阅 topic 下所有可读 messageQueue(id 按照副本集的维度从 0 递增)
         final List<Assignment> assignmentList = assignments.getAssignmentList();
         for (Assignment assignment : assignmentList) {
             latest.add(assignment.getMessageQueue());
         }
-
+        // 收集缓存中有效的 messageQueue (在最新的 latest 中，未过期)
+        // 以 processQueueTable 为基础，剔除不在 latest 中的，以过期的
+        // latest 中存在的 messageQueue 未必现在就在 processQueueTable 中
+        // 下面会将不再 processQueueTable 中，但在 latest 中的 messageQueue 缓存到 processQueueTable
         Set<MessageQueueImpl> activeMqs = new HashSet<>();
-
+        // 遍历所有订阅 topic messageQueue,过滤出本次 topic 下
         for (Map.Entry<MessageQueueImpl, ProcessQueue> entry : processQueueTable.entrySet()) {
             final MessageQueueImpl mq = entry.getKey();
             final ProcessQueue pq = entry.getValue();
+            // 过滤指定 topic 下的 messageQueue
             if (!topic.equals(mq.getTopic())) {
                 continue;
             }
-
+            // 如果缓存的 messageQueue 不在最新的里边则从缓存中剔除
             if (!latest.contains(mq)) {
                 log.info("Drop message queue according to the latest assignmentList, mq={}, clientId={}", mq,
                     clientId);
                 dropProcessQueue(mq);
                 continue;
             }
-
-            if (pq.expired()) {
+            // 缓存的 messageQueue 过期，剔除
+            // no fetch message for a long time
+            if (pq.expired()) { // idle 检测
                 log.warn("Drop message queue because it is expired, mq={}, clientId={}", mq, clientId);
                 dropProcessQueue(mq);
                 continue;
             }
             activeMqs.add(mq);
         }
-
+        // 遍历 latest， 向 processQueueTable 中添加新的 messageQueue
         for (MessageQueueImpl mq : latest) {
             if (activeMqs.contains(mq)) {
                 continue;
             }
             final Optional<ProcessQueue> optionalProcessQueue = createProcessQueue(mq, filterExpression);
+            // 新加入的 messageQueue, 立即开始拉取消息
             if (optionalProcessQueue.isPresent()) {
                 log.info("Start to fetch message from remote, mq={}, clientId={}", mq, clientId);
                 optionalProcessQueue.get().fetchMessageImmediately();
             }
         }
     }
-
+    // 向 proxy 获取每个订阅 topic 所在副本集中的所有可读 queue
+    // 如果是 fifo 则收集所有副本集中的所有可读 queue
+    // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
+    // 一个 Assignment 对应一个 MessageQueue
     @VisibleForTesting
     void scanAssignments() {
         try {
             log.debug("Start to scan assignments periodically, clientId={}", clientId);
+            // 以消费者本地指定的 subscriptionExpressions 为主，远程 broker 端只定义消费者组的消费行为
+            // 不会定义消费哪些 topic, 因为这个订阅关系是随时可变的，不适合 admin 一开始定义
             for (Map.Entry<String, FilterExpression> entry : subscriptionExpressions.entrySet()) {
                 final String topic = entry.getKey();
                 final FilterExpression filterExpression = entry.getValue();
                 final Assignments existed = cacheAssignments.get(topic);
+                // 向 proxy 获取 topic 所在副本集中的所有可读 queue
+                // 如果是 fifo 则收集所有副本集中的所有可读 queue
+                // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
+                // 一个 Assignment 对应一个 MessageQueue
                 final ListenableFuture<Assignments> future = queryAssignment(topic);
                 Futures.addCallback(future, new FutureCallback<Assignments>() {
                     @Override
@@ -453,6 +515,7 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
                         if (!latest.equals(existed)) {
                             log.info("Assignments of topic={} has changed, {} => {}, clientId={}", topic, existed,
                                 latest, clientId);
+                            // 订阅 topic 的所有可读队列（所有副本集中）
                             syncProcessQueue(topic, latest, filterExpression);
                             cacheAssignments.put(topic, latest);
                             return;
@@ -502,11 +565,14 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
     }
 
     int cacheMessageCountThresholdPerQueue() {
+        // consumer 订阅的所有 topic 下的所有 messageQueue 数量
         final int size = this.getQueueSize();
         // All process queues are removed, no need to cache messages.
         if (size <= 0) {
             return 0;
         }
+        // maxCacheMessageCount = 1024 ，这个是缓存消息的总量（针对所有 messageQueue(所有订阅 topic)）
+        // 1024 / size
         return Math.max(1, maxCacheMessageCount / size);
     }
 
@@ -581,6 +647,7 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
         RpcFuture<ForwardMessageToDeadLetterQueueRequest, ForwardMessageToDeadLetterQueueResponse> future;
         final ForwardMessageToDeadLetterQueueRequest request =
             wrapForwardMessageToDeadLetterQueueRequest(messageView);
+        // 一个 consumerGroup 对应一个死信队列 DLQTopic : %DLQ%consumerGroup
         future = this.getClientManager().forwardMessageToDeadLetterQueue(endpoints, request,
             clientConfiguration.getRequestTimeout());
         Futures.addCallback(future, new FutureCallback<ForwardMessageToDeadLetterQueueResponse>() {

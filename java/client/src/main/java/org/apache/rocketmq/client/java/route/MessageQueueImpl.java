@@ -31,7 +31,9 @@ public class MessageQueueImpl {
 
     private final Permission permission;
     private final List<MessageType> acceptMessageTypes;
-
+    // 向 proxy 获取 topic 所在副本集中的所有可读 queue
+    // 如果是 fifo 则收集所有副本集中的所有可读 queue
+    // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
     public MessageQueueImpl(apache.rocketmq.v2.MessageQueue messageQueue) {
         this.topicResource = new Resource(messageQueue.getTopic());
         this.queueId = messageQueue.getId();
@@ -42,6 +44,7 @@ public class MessageQueueImpl {
         for (apache.rocketmq.v2.MessageType type : types) {
             acceptMessageTypes.add(MessageType.fromProtobuf(type));
         }
+        // master
         this.broker = new Broker(messageQueue.getBroker());
     }
 

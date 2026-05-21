@@ -24,6 +24,8 @@ import org.apache.rocketmq.client.java.message.MessageViewImpl;
 import org.apache.rocketmq.client.java.route.Endpoints;
 
 public class ReceiveMessageResult {
+    // 逻辑意义为 messages 所在 broker 的地址
+    // 事实上是 proxy 地址
     private final Endpoints endpoints;
     private final List<MessageViewImpl> messages;
 

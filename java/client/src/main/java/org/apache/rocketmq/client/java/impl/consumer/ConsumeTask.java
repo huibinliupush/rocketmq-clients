@@ -61,6 +61,7 @@ public class ConsumeTask implements Callable<ConsumeResult> {
         MessageInterceptorContextImpl context = new MessageInterceptorContextImpl(MessageHookPoints.CONSUME);
         messageInterceptor.doBefore(context, generalMessages);
         try {
+            // 回调客户端指定的 messageListener
             consumeResult = messageListener.consume(messageView);
         } catch (Throwable t) {
             log.error("Message listener raised an exception while consuming messages, clientId={}, mq={}, " +

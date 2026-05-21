@@ -80,22 +80,29 @@ abstract class ConsumerImpl extends ClientImpl {
         try {
             final Endpoints endpoints = mq.getBroker().getEndpoints();
             final Duration tolerance = clientConfiguration.getRequestTimeout();
+            // longPollingTimeout + RequestTimeout
             final Duration timeout = awaitDuration.plus(tolerance);
             final ClientManager clientManager = this.getClientManager();
             final RpcFuture<ReceiveMessageRequest, List<ReceiveMessageResponse>> future =
                 clientManager.receiveMessage(endpoints, request, timeout);
+            // asyncWorker
             return Futures.transformAsync(future, responses -> {
                 Status status = Status.newBuilder().setCode(Code.INTERNAL_SERVER_ERROR)
                     .setMessage("status was not set by server")
                     .build();
                 Long transportDeliveryTimestamp = null;
                 List<Message> messageList = new ArrayList<>();
+                // proxy 端先回发送 ReceiveMessageResponse with status
+                // 然后一条一条的发送 ReceiveMessageResponse with message
+                // 所以这里收到的是一个 responses 集合
                 for (ReceiveMessageResponse response : responses) {
                     switch (response.getContentCase()) {
                         case STATUS:
+                            // 第一个 ReceiveMessageResponse
                             status = response.getStatus();
                             break;
                         case MESSAGE:
+                            // 第二个以及后续所有 ReceiveMessageResponse
                             messageList.add(response.getMessage());
                             break;
                         case DELIVERY_TIMESTAMP:
@@ -108,13 +115,14 @@ abstract class ConsumerImpl extends ClientImpl {
                     }
                 }
                 for (Message message : messageList) {
+                    // gRPC 消息解码为 MessageViewImpl
                     final MessageViewImpl view = MessageViewImpl.fromProtobuf(message, mq, transportDeliveryTimestamp);
                     messages.add(view);
                 }
                 StatusChecker.check(status, future);
                 final ReceiveMessageResult receiveMessageResult = new ReceiveMessageResult(endpoints, messages);
                 return Futures.immediateFuture(receiveMessageResult);
-            }, MoreExecutors.directExecutor());
+            }, MoreExecutors.directExecutor());// directExecutor : 回调在 Future 完成的那个线程中立即被执行。
         } catch (Throwable t) {
             // Should never reach here.
             log.error("[Bug] Exception raised during message receiving, mq={}, clientId={}", mq, clientId, t);
@@ -148,6 +156,7 @@ abstract class ConsumerImpl extends ClientImpl {
     }
 
     protected RpcFuture<AckMessageRequest, AckMessageResponse> ackMessage(MessageViewImpl messageView) {
+        // 消息所在的 broker, 但其实这里还是 proxy 地址，由 proxy 转发
         final Endpoints endpoints = messageView.getEndpoints();
         RpcFuture<AckMessageRequest, AckMessageResponse> future;
         final List<GeneralMessage> generalMessages = Collections.singletonList(new GeneralMessageImpl(messageView));
@@ -156,6 +165,11 @@ abstract class ConsumerImpl extends ClientImpl {
         try {
             final AckMessageRequest request = wrapAckMessageRequest(messageView);
             final Duration requestTimeout = clientConfiguration.getRequestTimeout();
+            // 向 reviveTopic 发送 ack 消息， tag 为 ACK_TAG， ack 之后的消息就不会复活了
+            // 但是这里 ack 消息并不会推进原来 topic 对应 queue 的 commitOffset
+            // pop 消息的 offset 由 broker 的 popMessageProcessor 负责推进，拉一批往前推一批
+            // 由于是消费者组并发 pop,所以需要保证其他消费者可以 pop 的接下来的消息，offset 只能一直向前推
+            // 而 ack pop message 只能保证它不会被重试
             future = this.getClientManager().ackMessage(endpoints, request, requestTimeout);
         } catch (Throwable t) {
             future = new RpcFuture<>(t);
@@ -180,7 +194,8 @@ abstract class ConsumerImpl extends ClientImpl {
         }, MoreExecutors.directExecutor());
         return future;
     }
-
+    // 向 reviveTopic 添加一个新的 checkpoint , 修改它的 InvisibleTim
+    // ack 原来的消息，防止原来的消息被重新投递，从而达到修改消息 InvisibleTim 的逻辑
     RpcFuture<ChangeInvisibleDurationRequest, ChangeInvisibleDurationResponse> changeInvisibleDuration(
         MessageViewImpl messageView, Duration invisibleDuration) {
         final Endpoints endpoints = messageView.getEndpoints();
@@ -191,6 +206,8 @@ abstract class ConsumerImpl extends ClientImpl {
         doBefore(context, generalMessages);
         final ChangeInvisibleDurationRequest request = wrapChangeInvisibleDuration(messageView, invisibleDuration);
         final Duration requestTimeout = clientConfiguration.getRequestTimeout();
+        // 向 reviveTopic 添加一个新的 checkpoint , 修改它的 InvisibleTim
+        // ack 原来的消息，防止原来的消息被重新投递，从而达到修改消息 InvisibleTim 的逻辑
         future = this.getClientManager().changeInvisibleDuration(endpoints, request, requestTimeout);
         final MessageId messageId = messageView.getMessageId();
         Futures.addCallback(future, new FutureCallback<ChangeInvisibleDurationResponse>() {
