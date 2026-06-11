@@ -39,6 +39,7 @@ public class MessageQueueImpl {
         this.queueId = messageQueue.getId();
         final apache.rocketmq.v2.Permission perm = messageQueue.getPermission();
         this.permission = Permission.fromProtobuf(perm);
+        // 空，proxy 并未赋值
         this.acceptMessageTypes = new ArrayList<>();
         final List<apache.rocketmq.v2.MessageType> types = messageQueue.getAcceptMessageTypesList();
         for (apache.rocketmq.v2.MessageType type : types) {

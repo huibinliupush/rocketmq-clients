@@ -111,7 +111,7 @@ public class ClientManagerImpl extends ClientManager {
     /**
      * Public executor for all async RPCs, <strong>should never submit a heavy task.</strong>
      */
-    private final ExecutorService asyncWorker;
+    private final ExecutorService asyncWorker; // availableProcessors, 50000 队列
 
     public ClientManagerImpl(Client client) {
         this.client = client;

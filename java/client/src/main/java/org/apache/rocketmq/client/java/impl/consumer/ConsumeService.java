@@ -79,6 +79,7 @@ public abstract class ConsumeService {
         final ConsumeTask task = new ConsumeTask(clientId, messageListener, messageView, messageInterceptor);
         // Consume message with no delay.
         if (Duration.ZERO.compareTo(delay) >= 0) {
+            // 非 FIFO 消费者
             return executorService.submit(task);
         }
         // 延时消费，用于 FIFO 消息消费失败本地延时重试

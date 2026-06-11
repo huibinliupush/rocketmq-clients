@@ -131,8 +131,21 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
     private final ThreadPoolExecutor consumptionExecutor;
     // 缓存订阅的 topic 下所有的有效 messageQueue(所有订阅 topic)
     // 这里缓存的是所有订阅 topic 的可读 message queue
+    // 如果是 fifo 则收集所有副本集中的所有可读 queue
+    // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
     private final ConcurrentMap<MessageQueueImpl, ProcessQueue> processQueueTable;
     // FifoConsumeService or StandardConsumeService ?
+    /**
+     * 这里的 FIFO 标识是在 admin 创建消费者组 SubscriptionGroup 时指定的，保存在 broker 中
+     * 消费者启动的时候会去 broker 拉取 SubscriptionGroup 相关配置
+     * 只要在 admin 指定了 FIFO, 那么 broker 端的拉取以及这里的消息消费逻辑均是 FIFO, 无论你订阅的事 normalTopic 还是延时，事务 topic
+     * admin 指定非 FIFO ,那么 broker 端的拉取以及这里的消息消费逻辑均是非 FIFO ，即使你订阅的是 FIFO topic
+     * 因此一个 SubscriptionGroup 不能同时订阅 FIFO TOPIC 和其他类型 topic
+     * 其实更加合理的设计是根据 topic 的类型来，而不是一开始由 admin 指定，topic 类型是 FIFO 的，那么消息拉取以及消费都是 FIFO
+     * TOPIC 类型是非 FIFO 的，那么消息的拉取以及消费都应该是非 FIFO
+     * 这样 SubscriptionGroup 就能随意订阅任何 topic 类型了
+     *
+     * */
     private ConsumeService consumeService;
 
     private volatile ScheduledFuture<?> scanAssignmentsFuture;
@@ -207,6 +220,17 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
             // availableProcessors
             final ScheduledExecutorService scheduler = this.getClientManager().getScheduler();
             // FifoConsumeService or StandardConsumeService ?
+            /**
+             * 这里的 FIFO 标识是在 admin 创建消费者组 SubscriptionGroup 时指定的，保存在 broker 中
+             * 消费者启动的时候会去 broker 拉取 SubscriptionGroup 相关配置
+             * 只要在 admin 指定了 FIFO, 那么 broker 端的拉取以及这里的消息消费逻辑均是 FIFO, 无论你订阅的事 normalTopic 还是延时，事务 topic
+             * admin 指定非 FIFO ,那么 broker 端的拉取以及这里的消息消费逻辑均是非 FIFO ，即使你订阅的是 FIFO topic
+             * 因此一个 SubscriptionGroup 不能同时订阅 FIFO TOPIC 和其他类型 topic
+             * 其实更加合理的设计是根据 topic 的类型来，而不是一开始由 admin 指定，topic 类型是 FIFO 的，那么消息拉取以及消费都是 FIFO
+             * TOPIC 类型是非 FIFO 的，那么消息的拉取以及消费都应该是非 FIFO
+             * 这样 SubscriptionGroup 就能随意订阅任何 topic 类型了
+             *
+             * */
             this.consumeService = createConsumeService();
             // Scan assignments periodically.
             scanAssignmentsFuture = scheduler.scheduleWithFixedDelay(() -> {
@@ -272,7 +296,17 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
                 + "clientId={}", clientId, e);
         }
     }
-
+/**
+ * 这里的 FIFO 标识是在 admin 创建消费者组 SubscriptionGroup 时指定的，保存在 broker 中
+ * 消费者启动的时候会去 broker 拉取 SubscriptionGroup 相关配置
+ * 只要在 admin 指定了 FIFO, 那么 broker 端的拉取以及这里的消息消费逻辑均是 FIFO, 无论你订阅的事 normalTopic 还是延时，事务 topic
+ * admin 指定非 FIFO ,那么 broker 端的拉取以及这里的消息消费逻辑均是非 FIFO ，即使你订阅的是 FIFO topic
+ * 因此一个 SubscriptionGroup 不能同时订阅 FIFO TOPIC 和其他类型 topic
+ * 其实更加合理的设计是根据 topic 的类型来，而不是一开始由 admin 指定，topic 类型是 FIFO 的，那么消息拉取以及消费都是 FIFO
+ * TOPIC 类型是非 FIFO 的，那么消息的拉取以及消费都应该是非 FIFO
+ * 这样 SubscriptionGroup 就能随意订阅任何 topic 类型了
+ *
+ * */
     private ConsumeService createConsumeService() {
         // availableProcessors
         final ScheduledExecutorService scheduler = this.getClientManager().getScheduler();
@@ -364,6 +398,7 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
     // 如果是 fifo 则收集所有副本集中的所有可读 queue
     // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
     ListenableFuture<Assignments> queryAssignment(final String topic) {
+        // 获取 proxy endpoints
         final ListenableFuture<Endpoints> future0 = pickEndpointsToQueryAssignments(topic);
         return Futures.transformAsync(future0, endpoints -> {
             final QueryAssignmentRequest request = wrapQueryAssignmentRequest(topic);
@@ -427,7 +462,8 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
     }
 
     // 订阅的 topic
-    // assignments : topic 所在副本集中所有可读的 messageQueue, 对于非 fifo 来说，这里每个副本集只收集一个 queue(id=-1), 后续到了 broker 在随机选取 queue
+    // assignments : topic 所在副本集中所有可读的 messageQueue, 对于非 fifo 来说，这里每个副本集只收集一个 queue(id=-1),
+    // 后续到了 broker 在随机选取 queue
     // filterExpression : 用户指定的消费 topic 对应的 filterExpression
     @VisibleForTesting
     void syncProcessQueue(String topic, Assignments assignments, FilterExpression filterExpression) {
@@ -460,8 +496,11 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
             }
             // 缓存的 messageQueue 过期，剔除
             // no fetch message for a long time
+            // 空闲时间不能超过 9s
+            // activityNanoTime and cacheFullNanoTime 不能超过 9s
             if (pq.expired()) { // idle 检测
                 log.warn("Drop message queue because it is expired, mq={}, clientId={}", mq, clientId);
+
                 dropProcessQueue(mq);
                 continue;
             }
@@ -499,6 +538,7 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
                 // 非 fifo 则每个副本集只收集一个可读 queue, 并且 queueId 是 -1 ， 到了 broker 会随机选择 queue
                 // 一个 Assignment 对应一个 MessageQueue
                 final ListenableFuture<Assignments> future = queryAssignment(topic);
+                // 由 asyncWorker( availableProcessors, 50000 队列) 执行
                 Futures.addCallback(future, new FutureCallback<Assignments>() {
                     @Override
                     public void onSuccess(Assignments latest) {
@@ -561,6 +601,7 @@ class PushConsumerImpl extends ConsumerImpl implements PushConsumer {
         if (size <= 0) {
             return 0;
         }
+        // 64M
         return Math.max(1, maxCacheMessageSizeInBytes / size);
     }
 

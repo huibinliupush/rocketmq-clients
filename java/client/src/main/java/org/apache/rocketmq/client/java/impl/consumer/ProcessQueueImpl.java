@@ -112,10 +112,11 @@ class ProcessQueueImpl implements ProcessQueue {
     private final AtomicLong receptionTimes;
     // 接收到消息的总数
     private final AtomicLong receivedMessagesQuantity;
-
+    // 最近拉取消息的时间戳, receiveMessageImmediately 时会更新
     private volatile long activityNanoTime = System.nanoTime();
     // cachedMessages 满了时时候的时间戳
     // cacheMessageCountThresholdPerQueue <= actualMessagesQuantity
+    // cacheMessageBytesThresholdPerQueue <= actualCachedMessagesBytes
     private volatile long cacheFullNanoTime = Long.MIN_VALUE;
 
     public ProcessQueueImpl(PushConsumerImpl consumer, MessageQueueImpl mq, FilterExpression filterExpression) {
@@ -144,8 +145,11 @@ class ProcessQueueImpl implements ProcessQueue {
 
     @Override
     public boolean expired() {
+        // 20s
         final Duration longPollingTimeout = consumer.getPushConsumerSettings().getLongPollingTimeout();
+        // 3s
         final Duration requestTimeout = consumer.getClientConfiguration().getRequestTimeout();
+        // 9s
         final Duration maxIdleDuration = longPollingTimeout.plus(requestTimeout).multipliedBy(3);
         final Duration idleDuration = Duration.ofNanos(System.nanoTime() - activityNanoTime);
         if (idleDuration.compareTo(maxIdleDuration) < 0) {
@@ -192,8 +196,12 @@ class ProcessQueueImpl implements ProcessQueue {
      * <p> Make sure that no exception will be thrown.
      */
     public void onReceiveMessageException(Throwable t, String attemptId) {
+        // RECEIVING_FLOW_CONTROL_BACKOFF_DELAY = 20ms
+        // RECEIVING_FAILURE_BACKOFF_DELAY = 1s
         Duration delay = t instanceof TooManyRequestsException ? RECEIVING_FLOW_CONTROL_BACKOFF_DELAY :
             RECEIVING_FAILURE_BACKOFF_DELAY;
+        // 只有在 DEADLINE_EXCEEDED 的时候才会重复使用上一次的 AttemptId
+        // 否则新建 AttemptId
         receiveMessageLater(delay, attemptId);
     }
     // asyncWorker 执行
@@ -202,6 +210,8 @@ class ProcessQueueImpl implements ProcessQueue {
         final ScheduledExecutorService scheduler = consumer.getScheduler();
         try {
             log.info("Try to receive message later, mq={}, delay={}, clientId={}", mq, delay, clientId);
+            // 只有在 DEADLINE_EXCEEDED 的时候才会重复使用上一次的 AttemptId
+            // 否则新建 AttemptId
             scheduler.schedule(() -> receiveMessage(attemptId), delay.toNanos(), TimeUnit.NANOSECONDS);
         } catch (Throwable t) {
             if (scheduler.isShutdown()) {
@@ -230,7 +240,7 @@ class ProcessQueueImpl implements ProcessQueue {
             return;
         }
         // cache 满了就等 1s后再 pop
-        if (this.isCacheFull()) {
+        if (this.isCacheFull()) { // 对单个 queue 可以缓存的消息个数以及消息body size 进行限制
             log.warn("Process queue cache is full, would receive message later, mq={}, clientId={}", mq, clientId);
             receiveMessageLater(RECEIVING_BACKOFF_DELAY_WHEN_CACHE_IS_FULL, attemptId);
             return;
@@ -259,7 +269,7 @@ class ProcessQueueImpl implements ProcessQueue {
             // 创建 gRPC 请求
             final ReceiveMessageRequest request = consumer.wrapReceiveMessageRequest(batchSize, mq, filterExpression,
                 longPollingTimeout, attemptId);
-            // 更新 activeTime , 用于 idle 检测
+            // 更新 activeTime , 用于 idle 检测，超过 9s 则该 processQueue 过期
             activityNanoTime = System.nanoTime();
 
             // Intercept before message reception.
@@ -298,6 +308,8 @@ class ProcessQueueImpl implements ProcessQueue {
                         if (t instanceof StatusRuntimeException) {
                             StatusRuntimeException exception = (StatusRuntimeException) t;
                             if (io.grpc.Status.DEADLINE_EXCEEDED.getCode() == exception.getStatus().getCode()) {
+                                // 只有在 DEADLINE_EXCEEDED 的时候才会重复使用上一次的 AttemptId
+                                // 否则新建 AttemptId
                                 nextAttemptId = request.getAttemptId();
                             }
                         }
@@ -309,6 +321,9 @@ class ProcessQueueImpl implements ProcessQueue {
                         log.error("Exception raised during message reception, mq={}, endpoints={}, attemptId={}, " +
                                 "nextAttemptId={}, clientId={}", mq, endpoints, request.getAttemptId(), nextAttemptId,
                             clientId, t);
+                        // 延时调用 receiveMessageImmediately
+                        // RECEIVING_FLOW_CONTROL_BACKOFF_DELAY = 20ms
+                        // RECEIVING_FAILURE_BACKOFF_DELAY = 1s
                         onReceiveMessageException(t, nextAttemptId);
                     }
                 }, MoreExecutors.directExecutor());
@@ -319,7 +334,7 @@ class ProcessQueueImpl implements ProcessQueue {
             onReceiveMessageException(t, attemptId);
         }
     }
-
+    // 对单个 queue 可以缓存的消息个数以及消息body size 进行限制
     public boolean isCacheFull() {
         // 每个 queue 可以缓存的消息个数
         final int cacheMessageCountThresholdPerQueue = consumer.cacheMessageCountThresholdPerQueue();
@@ -332,7 +347,9 @@ class ProcessQueueImpl implements ProcessQueue {
             cacheFullNanoTime = System.nanoTime();
             return true;
         }
+        // 每个 queue 可以缓存的消息size
         final int cacheMessageBytesThresholdPerQueue = consumer.cacheMessageBytesThresholdPerQueue();
+        // 当前缓存的消息 body size 总量
         final long actualCachedMessagesBytes = this.cachedMessageBytes();
         if (cacheMessageBytesThresholdPerQueue <= actualCachedMessagesBytes) {
             log.warn("Process queue total cached messages memory exceeds the threshold, threshold={} bytes," +
@@ -389,6 +406,17 @@ class ProcessQueueImpl implements ProcessQueue {
             // 如果前一个消息没有消费成功，那么就进行重试，重试成功之后再开始下一个消息消费
             // 如果重试一直失败，达到最大重试次数，则直接发送到死信队列，发送成功之后（不成功则一直重试直到成功）再开始下一个消息的消费
             // 消费成功也是一样，必须等到 ackMessage 成功之后才能消费下一个消息
+            /**
+             * 这里的 FIFO 标识是在 admin 创建消费者组 SubscriptionGroup 时指定的，保存在 broker 中
+             * 消费者启动的时候会去 broker 拉取 SubscriptionGroup 相关配置
+             * 只要在 admin 指定了 FIFO, 那么 broker 端的拉取以及这里的消息消费逻辑均是 FIFO, 无论你订阅的事 normalTopic 还是延时，事务 topic
+             * admin 指定非 FIFO ,那么 broker 端的拉取以及这里的消息消费逻辑均是非 FIFO ，即使你订阅的是 FIFO topic
+             * 因此一个 SubscriptionGroup 不能同时订阅 FIFO TOPIC 和其他类型 topic
+             * 其实更加合理的设计是根据 topic 的类型来，而不是一开始由 admin 指定，topic 类型是 FIFO 的，那么消息拉取以及消费都是 FIFO
+             * TOPIC 类型是非 FIFO 的，那么消息的拉取以及消费都应该是非 FIFO
+             * 这样 SubscriptionGroup 就能随意订阅任何 topic 类型了
+             *
+             * */
             consumer.getConsumeService().consume(this, messages);
         }
         // 继续 pop
@@ -586,6 +614,7 @@ class ProcessQueueImpl implements ProcessQueue {
                             " clientId={}, consumerGroup={}, messageId={}, attempt={}, mq={}, endpoints={}, "
                             + "requestId={}, code={}, status message={}", clientId, consumerGroup, messageId, attempt,
                         mq, endpoints, requestId, code, status.getMessage());
+                    // 延时 1s 不停的尝试直到成功
                     forwardToDeadLetterQueueLater(messageView, 1 + attempt, future0);
                     return;
                 }
@@ -689,6 +718,7 @@ class ProcessQueueImpl implements ProcessQueue {
                 log.error("Exception raised while acknowledging message, clientId={}, consumerGroup={}, "
                         + "would attempt to re-ack later, attempt={}, messageId={}, mq={}, endpoints={}", clientId,
                     consumerGroup, attempt, messageId, mq, endpoints, t);
+                // ack 失败则延时 1s 继续 ack
                 ackMessageLater(messageView, 1 + attempt, future0);
             }
         }, MoreExecutors.directExecutor());

@@ -58,6 +58,7 @@ class FifoConsumeService extends ConsumeService {
             consumeIteratively(pq, messageViews.iterator());
             return;
         }
+        // FIFO 消息按照 messageGroup 分组
         Map<String, List<MessageViewImpl>> messageViewsGroupByMessageGroup = new HashMap<>();
         List<MessageViewImpl> messageViewsWithoutMessageGroup = new ArrayList<>();
         for (MessageViewImpl messageView : messageViews) {
@@ -72,7 +73,7 @@ class FifoConsumeService extends ConsumeService {
 
         log.debug("FifoConsumeService parallel consume, messageViewsNum={}, groupNum={}", messageViews.size(),
             messageViewsGroupByMessageGroup.size() + (messageViewsWithoutMessageGroup.isEmpty() ? 0 : 1));
-
+        // 按照 messageGroup 分组消费
         messageViewsGroupByMessageGroup.values().forEach(list -> consumeIteratively(pq, list.iterator()));
         consumeIteratively(pq, messageViewsWithoutMessageGroup.iterator());
     }
@@ -95,9 +96,9 @@ class FifoConsumeService extends ConsumeService {
             consumeIteratively(pq, iterator);
             return;
         }
-        // 按照顺序消费第一个 FIFO 消息
+        // 按照顺序消费第一个 FIFO 消息，这里和非 FIFO 一样都是向 consumer thread 提交消费任务
         final ListenableFuture<ConsumeResult> future0 = consume(messageView);
-        // 处理消费结果
+        // 处理消费结果（这里就不一样了）
         ListenableFuture<Void> future = Futures.transformAsync(future0, result -> pq.eraseFifoMessage(messageView,
             result), MoreExecutors.directExecutor());
         // 第一个消费完之后，在接着消费下一个 FIFO 消息

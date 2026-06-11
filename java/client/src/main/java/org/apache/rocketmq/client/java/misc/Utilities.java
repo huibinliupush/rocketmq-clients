@@ -196,6 +196,7 @@ public class Utilities {
         byte[] uncompressData = new byte[src.length];
 
         ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(src);
+        // GZIPInputStream
         FilterInputStream filterInputStream = getStreamByMagicCode(src, byteArrayInputStream);
         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream(src.length);
 

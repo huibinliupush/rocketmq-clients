@@ -84,6 +84,7 @@ public class MessageViewImpl implements MessageView {
         this.bornHost = checkNotNull(bornHost, "bornHost should not be null");
         this.bornTimestamp = bornTimestamp;
         this.deliveryAttempt = deliveryAttempt;
+        // 来自客户端分配的 messageQueue
         this.messageQueue = messageQueue;
         this.endpoints = null == messageQueue ? null : messageQueue.getBroker().getEndpoints();
         this.receiptHandle = checkNotNull(receiptHandle, "receiptHandle should not be null");

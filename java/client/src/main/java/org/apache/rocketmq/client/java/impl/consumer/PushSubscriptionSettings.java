@@ -116,6 +116,8 @@ public class PushSubscriptionSettings extends Settings {
     // 剩下的订阅配置由本地 setting 配置决定，admin 创建的 SubscriptionGroupConfig 主要用来规定消费行为
     // 具体订阅消费哪些数据是可变的，所以由客户端的 setting 决定，比如订阅那些 topic 都是随时可变的只能由消费者灵活制定
     // admin 在创建消费者组的时候无法判定要订阅哪些 topic, 无法灵活改变，所以这部分订阅配置由消费者指定
+
+    // 每个 proxy 的 setting 响应都会调用到这里
     @Override
     public void sync(apache.rocketmq.v2.Settings settings) {
         // 从远程 broker 获取到的 consumerGroup 订阅关系配置（由 admin 创建消费者组的时候在指定 broker 填充）
